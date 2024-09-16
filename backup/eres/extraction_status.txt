@@ -1,0 +1,20 @@
+Started! (Sat Sep  7 12:48:09 2024) 
+
+Saving Slice 0: Starting 2015-02-11 20:41:19 ending 2015-02-25 18:07:25 - (Sat Sep  7 12:48:09 2024)
+Edge Added: 2	Edge removed: 0
+Writing Communities (Sat Sep  7 12:48:09 2024)
+Writing actual graph status (Sat Sep  7 12:48:09 2024)
+Writing merging file (Sat Sep  7 12:48:09 2024)
+Merged communities: 0 (Sat Sep  7 12:48:09 2024)
+Total Communities 0 (Sat Sep  7 12:48:09 2024)
+
+Started Slice 1 (12:48:09.675958)
+Saving Slice 1: Starting 2015-02-25 18:07:25 ending 2015-02-26 20:56:00 - (Sat Sep  7 12:48:09 2024)
+Edge Added: 1	Edge removed: 1
+Writing Communities (Sat Sep  7 12:48:09 2024)
+Writing actual graph status (Sat Sep  7 12:48:09 2024)
+Writing merging file (Sat Sep  7 12:48:09 2024)
+Merged communities: 0 (Sat Sep  7 12:48:09 2024)
+Total Communities 0 (Sat Sep  7 12:48:09 2024)
+
+Started Slice 2 (12:48:09.676958)
