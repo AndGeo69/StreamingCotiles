@@ -1,5 +1,5 @@
-from tiles.alg.TILES import TILES
-from tiles.alg.eTILES import eTILES
+from alg.TILES import TILES
+from alg.eTILES import eTILES
 import sys
 import argparse
 

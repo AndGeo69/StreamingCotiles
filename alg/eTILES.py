@@ -104,7 +104,7 @@ class eTILES(TILES):
                 actual_time = dt
                 self.status.flush()
 
-                self.splits = gzip.open("%s/%s/Draft3/splitting-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
+                self.splits = gzip.open("%s/%s/splitting-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
                 self.splits.write(self.spl.getvalue())
                 self.splits.flush()
                 self.splits.close()
@@ -190,7 +190,7 @@ class eTILES(TILES):
 
             # u and v shared communities
             if len(list(self.g.neighbors(u))) > 1 and len(list(self.g.neighbors(v))) > 1:
-                coms = set(self.g.node[u]['c_coms'].keys()) & set(self.g.node[v]['c_coms'].keys())
+                coms = set(self.g.nodes[u]['c_coms'].keys()) & set(self.g.nodes[v]['c_coms'].keys())
 
                 for c in coms:
                     if c not in coms_to_change:
@@ -205,12 +205,12 @@ class eTILES(TILES):
                         coms_to_change[c] = list(ctc)
             else:
                 if len(list(self.g.neighbors(u))) < 2:
-                    coms_u = copy.copy(list(self.g.node[u]['c_coms'].keys()))
+                    coms_u = copy.copy(list(self.g.nodes[u]['c_coms'].keys()))
                     for cid in coms_u:
                         self.remove_from_community(u, cid, t)
 
                 if len(list(self.g.neighbors(v))) < 2:
-                    coms_v = copy.copy(list(self.g.node[v]['c_coms'].keys()))
+                    coms_v = copy.copy(list(self.g.nodes[v]['c_coms'].keys()))
                     for cid in coms_v:
                         self.remove_from_community(v, cid, t)
 

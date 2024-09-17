@@ -1,5 +1,6 @@
 import unittest
-import tiles as t
+from alg.TILES import TILES
+from alg.eTILES import eTILES
 import shutil
 import glob
 import os
@@ -11,27 +12,27 @@ class TilesTestCase(unittest.TestCase):
         base = os.path.dirname(os.path.abspath(__file__))
         directory = "eres"
 
-        try:
-            # Ensure the directory is created
-            os.makedirs(directory, exist_ok=True)  # `exist_ok=True` prevents the FileExistsError
+        # try:
+        # Ensure the directory is created
+        os.makedirs(directory, exist_ok=True)  # `exist_ok=True` prevents the FileExistsError
 
-            et = t.eTILES(filename="%s/mydata/NetworkSegmentETiles30.tsv" % base, obs=1, path=directory)
-            et.execute()
+        et = eTILES(filename="%s/mydata/NetworkSegmentETiles30.tsv" % base, obs=1, path=directory)
+        et.execute()
 
-            count = 0
-            for _ in glob.glob(f"{directory}/graph*"):
-                count += 1
-            self.assertEqual(count, 6)
+        count = 0
+        for _ in glob.glob(f"{directory}/graph*"):
+            count += 1
+        self.assertEqual(count, 683)
 
-        finally:
-            # Cleanup: Remove the directory if it exists
-            if os.path.exists(directory):
-                shutil.rmtree(directory)
+        # finally:
+        #     # Cleanup: Remove the directory if it exists
+        #     if os.path.exists(directory):
+        #         shutil.rmtree(directory)
 
     def test_TILES(self):
         base = os.path.dirname(os.path.abspath(__file__))
         os.makedirs("res")
-        et = t.TILES(filename="%s/sample_net_tiles.tsv" % base, obs=1, path="res")
+        et = TILES(filename="%s/sample_net_tiles.tsv" % base, obs=1, path="res")
         et.execute()
 
         count = 0

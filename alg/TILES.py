@@ -150,11 +150,11 @@ class TILES(object):
 
             if not self.g.has_node(u):
                 self.g.add_node(u)
-                self.g.node[u]['c_coms'] = {}  # central
+                self.g.nodes[u]['c_coms'] = {}  # central
 
             if not self.g.has_node(v):
                 self.g.add_node(v)
-                self.g.node[v]['c_coms'] = {}
+                self.g.nodes[v]['c_coms'] = {}
 
             if self.g.has_edge(u, v):
                 w = self.g.adj[u][v]["weight"]
@@ -251,7 +251,7 @@ class TILES(object):
                         else:
                             # u and v shared communities
                             if len(list(self.g.neighbors(u))) > 1 and len(list(self.g.neighbors(v))) > 1:
-                                coms = set(self.g.node[u]['c_coms'].keys()) & set(self.g.node[v]['c_coms'].keys())
+                                coms = set(self.g.nodes[u]['c_coms'].keys()) & set(self.g.nodes[v]['c_coms'].keys())
 
                                 for c in coms:
                                     if c not in coms_to_change:
@@ -266,12 +266,12 @@ class TILES(object):
                                         coms_to_change[c] = list(ctc)
                             else:
                                 if len(list(self.g.neighbors(u))) < 2:
-                                    coms_u = [x for x in self.g.node[u]['c_coms'].keys()]
+                                    coms_u = [x for x in self.g.nodes[u]['c_coms'].keys()]
                                     for cid in coms_u:
                                         self.remove_from_community(u, cid)
 
                                 if len(list(self.g.neighbors(v))) < 2:
-                                    coms_v = [x for x in self.g.node[v]['c_coms'].keys()]
+                                    coms_v = [x for x in self.g.nodes[v]['c_coms'].keys()]
                                     for cid in coms_v:
                                         self.remove_from_community(v, cid)
 
@@ -384,18 +384,18 @@ class TILES(object):
         else:
 
 
-            shared_coms = set(self.g.node[v]['c_coms'].keys()) & set(self.g.node[u]['c_coms'].keys())
+            shared_coms = set(self.g.nodes[v]['c_coms'].keys()) & set(self.g.nodes[u]['c_coms'].keys())
             #self.representation.write("...............................Shared communities of %s and %s are: %s\n"%(u, v, shared_coms))
-            only_u = set(self.g.node[u]['c_coms'].keys()) - set(self.g.node[v]['c_coms'].keys())
+            only_u = set(self.g.nodes[u]['c_coms'].keys()) - set(self.g.nodes[v]['c_coms'].keys())
             #self.representation.write("...............................Communities where only %s belongs:  %s\n"%(u, only_u))
-            only_v = set(self.g.node[v]['c_coms'].keys()) - set(self.g.node[u]['c_coms'].keys())
+            only_v = set(self.g.nodes[v]['c_coms'].keys()) - set(self.g.nodes[u]['c_coms'].keys())
             #self.representation.write("...............................Communities where only %s belongs:  %s\n"%(v, only_v))
             #print(" ")
             # community propagation: a community is propagated iff at least two of [u, v, z] are central
             propagated = False
 
             for z in common_neighbors:
-                for c in self.g.node[z]['c_coms'].keys():
+                for c in self.g.nodes[z]['c_coms'].keys():
                     #if c in only_v and len(only_v) < 5:
                     if c in only_v:
                         self.add_to_community(u, c, tags )
@@ -410,7 +410,7 @@ class TILES(object):
                         propagated = True
 
                 for c in shared_coms:
-                    if c not in self.g.node[z]['c_coms']:
+                    if c not in self.g.nodes[z]['c_coms']:
                         self.add_to_community(z, c, tags )
                         propagated = True
 
@@ -437,7 +437,7 @@ class TILES(object):
             Print the actual communities
         """
 
-        out_file_coms = gzip.open("%s/%s/Draft3/strong-communities-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
+        out_file_coms = gzip.open("%s/%s/strong-communities-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
         com_string = StringIO()
 
         nodes_to_coms = {}
@@ -497,7 +497,7 @@ class TILES(object):
         # write the graph
         self.status.write(u"Writing actual graph status (%s)\n" % str(time.asctime(time.localtime(time.time()))))
         self.status.flush()
-        out_file_graph = gzip.open("%s/%s/Draft3/graph-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
+        out_file_graph = gzip.open("%s/%s/graph-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
         g_string = StringIO()
         for e in self.g.edges():
             g_string.write(u"%d\t%s\t%d\t%s\n" % (e[0], e[1], self.g.adj[e[0]][e[1]]['weight'], self.g.adj[e[0]][e[1]]['t']))
@@ -509,7 +509,7 @@ class TILES(object):
         # Write merge status
         self.status.write(u"Writing merging file (%s)\n" % str(time.asctime(time.localtime(time.time()))))
         self.status.flush()
-        out_file_merge = gzip.open("%s/%s/Draft3/merging-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
+        out_file_merge = gzip.open("%s/%s/merging-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
         m_string = StringIO()
         for comid, c_val in iteritems(merge):
             # maintain minimum community after merge
@@ -550,15 +550,15 @@ class TILES(object):
             # print(self.CommunityTags[cid])
 
         if flag == 1:
-            self.g.node[node]['c_coms'][cid] = None
+            self.g.nodes[node]['c_coms'][cid] = None
             if cid in self.communities:
                 self.communities[cid][node] = None
             else:
                 self.communities[cid] = {node: None}
 
     def remove_from_community(self, node, cid, tags):
-        if cid in self.g.node[node]['c_coms']:
-            self.g.node[node]['c_coms'].pop(cid, None)
+        if cid in self.g.nodes[node]['c_coms']:
+            self.g.nodes[node]['c_coms'].pop(cid, None)
             for tg in tags.split(','):
                 if tg in self.CommunityTags[cid]:
                     self.CommunityTags[cid].remove(tg)
