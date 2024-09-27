@@ -1,0 +1,38 @@
+#!/bin/bash
+
+# Define the path to your text file
+FILE="/home/bigdata/master/MEDES/NetworkSegment.txt"
+
+# Ensure the file exists
+if [[ ! -f $FILE ]]; then
+    echo "File not found!"
+    exit 1
+fi
+
+# Start netcat in the background to listen on port 9999
+nc -lk 9999 &
+
+# Store the PID of the netcat process
+NC_PID=$!
+
+# Function to clean up
+cleanup() {
+    echo "Stopping netcat..."
+    kill $NC_PID
+    exit 0
+}
+
+# Trap signals to clean up before exiting
+trap cleanup SIGINT SIGTERM
+
+# Infinite loop to send the contents of the file
+while true; do 
+    # Loop through the file line by line
+    while IFS= read -r line; do
+        echo "$line" | nc localhost 9999  # Send the line to the open socket
+        sleep 1  # Adjust the sleep duration as needed
+    done < "$FILE"
+
+    # Optionally add a delay before re-sending the file
+    sleep 5
+done
