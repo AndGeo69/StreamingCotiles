@@ -2,29 +2,40 @@ from pyspark.sql import SparkSession
 import subprocess
 import sys
 
+from pyspark.sql.functions import explode, split
+from pyspark.streaming import StreamingContext
+
 
 if __name__ == "__main__":
 
-    spark = SparkSession.builder.appName("TILES and eTILES Runner").getOrCreate()
-    sc = spark.sparkContext
+    spark = SparkSession.builder.appName("StreamingCOTILES").getOrCreate()
 
-    # Define file path (assuming it's in the same directory)
-    input_file = "NetworkSegmentETiles30.tsv"
+    # Streaming Context Spark's DStream API
+    # sc = spark.sparkContext
+    # ssc = StreamingContext(sc, 1)
+    # lines = ssc.socketTextStream("localhost", 9999)
+    # lines.pprint()
+    # ssc.start()
+    # ssc.awaitTermination()
 
-    # Read the TSV file into a DataFrame
-    df = spark.read.csv(input_file, sep="\t", header=False)
+    # Structured Streaming API
+    lines = spark.readStream.format('socket').option('host', 'localhost').option('port','9999').load()
 
-    # Show some rows (for debugging purposes)
-    df.show(5)
+    words = lines.select(
+        explode(
+            split(lines.value, '\t')
+        ).alias('word')
+    )
+    wordCounts = words.groupBy('word').count()
+    query = wordCounts.writeStream.outputMode('complete').format('console').trigger(processingTime='5 seconds').start()
 
-    # Optionally, you can perform transformations on the data here if needed
-    # For example, filtering rows or adding columns.
+    query.awaitTermination()
 
-    # Define a function to run the external Python script using subprocess
+
     def run_tiles_algorithm(mode, obs, ttl, path, filename):
         try:
             process = subprocess.Popen([
-                sys.executable, '/home/bigdata/PycharmProjects/StreamingCotiles/__main__.py',  # Replace this with the full path to your __main__.py if necessary
+                sys.executable, '/home/bigdata/PycharmProjects/StreamingCotiles/__main__.py',
                 filename,
                 '-m', mode,
                 '-o', str(obs),
@@ -32,24 +43,21 @@ if __name__ == "__main__":
                 '-p', path
             ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
 
-            # Read stdout and stderr in real-time
             for line in process.stdout:
                 print(line, end="")  # Output the stdout to the console in real-time
 
-            # Wait for the process to finish and get the exit code
             process.wait()
 
-            # Check if any error occurred (stderr)
             for line in process.stderr:
-                print(f"Error: {line}", end="")  # Output the stderr to the console in real-time
+                print(f"Error: {line}", end="")
 
             if process.returncode != 0:
-                print(f"TILES/eTILES algorithm failed with exit code {process.returncode}")
+                print(f"COTILES algorithm failed with exit code {process.returncode}")
             else:
-                print("TILES/eTILES algorithm finished successfully.")
+                print("COTILES algorithm finished successfully.")
 
         except Exception as e:
-            print(f"Error running the TILES/eTILES algorithm: {e}")
+            print(f"Error running the COTILES algorithm: {e}")
 
     # Set the mode for running the algorithm (TTL or Explicit)
     mode = 'Explicit'  # Or 'TTL'
@@ -57,8 +65,8 @@ if __name__ == "__main__":
     ttl = 5            # Time-to-live for edges
     path = 'results'   # Directory to store output results (adjust as needed)
 
-    # Instead of saving the DataFrame, just call the TILES or eTILES algorithm
-    run_tiles_algorithm(mode, obs, ttl, path, input_file)
+    # Instead of saving the DataFrame, just call the COTILES algorithm
+    # run_tiles_algorithm(mode, obs, ttl, path, input_file)
 
-    # Stop the Spark session
-    spark.stop()
+    # dont stop when dealing with streaming data
+    # spark.stop()
