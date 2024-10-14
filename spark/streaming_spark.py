@@ -1,35 +1,38 @@
-from pyspark.sql import SparkSession
+import subprocess
 import subprocess
 import sys
+import time
 
+from pyspark.sql import SparkSession
 from pyspark.sql.functions import explode, split
-from pyspark.streaming import StreamingContext
 
+# Acts as the client, connecting to an open socket ready to receive data and process it
+def create_streaming_session():
+    while True:
+        try:
+            # Initialize SparkSession
+            spark = SparkSession.builder.appName("StreamingCOTILES").getOrCreate()
+            spark.conf.set("spark.sql.shuffle.partitions", "2") # testing smalling partitions over the default 200
+            # Structured Streaming API
+            lines = spark.readStream.format('socket').option('host', 'localhost').option('port', '9999').load()
 
-if __name__ == "__main__":
+            # Split and process words
+            words = lines.select(explode(split(lines.value, '\t')).alias('word'))
 
-    spark = SparkSession.builder.appName("StreamingCOTILES").getOrCreate()
+            # Count words
+            wordCounts = words.groupBy('word').count()
 
-    # Streaming Context Spark's DStream API
-    # sc = spark.sparkContext
-    # ssc = StreamingContext(sc, 1)
-    # lines = ssc.socketTextStream("localhost", 9999)
-    # lines.pprint()
-    # ssc.start()
-    # ssc.awaitTermination()
+            # Start streaming query
+            query = wordCounts.writeStream.outputMode('complete').format('console').trigger(processingTime='500 milliseconds').start()
 
-    # Structured Streaming API
-    lines = spark.readStream.format('socket').option('host', 'localhost').option('port','9999').load()
+            # Await termination
+            query.awaitTermination()
+            break
 
-    words = lines.select(
-        explode(
-            split(lines.value, '\t')
-        ).alias('word')
-    )
-    wordCounts = words.groupBy('word').count()
-    query = wordCounts.writeStream.outputMode('complete').format('console').trigger(processingTime='5 seconds').start()
-
-    query.awaitTermination()
+        except Exception as e:
+            print(f"Failed to connect to socket: {e}")
+            print("Retrying in 5 seconds...")
+            time.sleep(5)
 
 
     def run_tiles_algorithm(mode, obs, ttl, path, filename):
@@ -70,3 +73,6 @@ if __name__ == "__main__":
 
     # dont stop when dealing with streaming data
     # spark.stop()
+
+if __name__ == "__main__":
+    create_streaming_session()
