@@ -33,7 +33,7 @@ class TILES:
     TILES: Algorithm for evolutionary community discovery with streaming support
     """
 
-    def __init__(self, g=nx.Graph(), ttl=float('inf'), obs=7, path="", start=None, end=None):
+    def __init__(self, stream=None, g=nx.Graph(), ttl=float('inf'), obs=7, path="", start=None, end=None):
         """
         Constructor
         :param g: networkx graph
@@ -58,88 +58,144 @@ class TILES:
         self.obs = obs
         self.communities = {}
 
-    def execute(self, lines_df):
+        self.stream = stream
+
+        self.edge_buffer = []
+
+    def execute(self):
         """
-        Execute TILES algorithm with streaming data using Spark Structured Streaming
-        :param lines_df: DataFrame representing the streaming data (['u', 'v', 't'])
+            Execute TILES algorithm
         """
-
-        def process_batch(batch_df, batch_id):
-            """
-            Process each micro-batch of the stream
-            :param batch_df: Micro-batch DataFrame
-            :param batch_id: ID of the batch
-            """
-            self.status.write(f"Processing batch {batch_id}\n")
-
-            # Process edges and community discovery within the batch
-            batch_df.foreach(lambda row: self.process_edge(row))
-
-            # Output the processed communities to the status file
-            for cid, nodes in self.communities.items():
-                self.status.write(f"Community {cid}: {len(nodes)} nodes\n")
-
-            # Flush the output files after processing the batch
-            self.status.flush()
-
-        # Write stream and process each batch
-        lines_df.writeStream \
-            .foreachBatch(process_batch) \
-            .start() \
-            .awaitTermination()
-
-    def process_edge(self, row):
-        """
-        Process a single edge (row of data)
-        :param row: Row object from Spark DataFrame
-        """
-        u = row['u']
-        v = row['v']
-        timestamp = row['t']
-
-        # Add the edge to the graph and manage the community
-        self.added += 1
-
-        if not self.g.has_node(u):
-            self.g.add_node(u)
-            self.g.nodes[u]['c_coms'] = {}  # central communities
-
-        if not self.g.has_node(v):
-            self.g.add_node(v)
-            self.g.nodes[v]['c_coms'] = {}
-
-        if self.g.has_edge(u, v):
-            self.g[u][v]['weight'] += 1
-            self.g[u][v]['t'] = timestamp
-        else:
-            self.g.add_edge(u, v, weight=1, t=timestamp)
-
-        u_n = list(self.g.neighbors(u))
-        v_n = list(self.g.neighbors(v))
-
-        # Check community evolution
-        if len(u_n) > 1 and len(v_n) > 1:
-            common_neighbors = set(u_n) & set(v_n)
-            self.common_neighbors_analysis(u, v, common_neighbors, timestamp)
-
-    def common_neighbors_analysis(self, u, v, common_neighbors, timestamp):
-        """
-        Analyze the common neighbors of nodes u and v.
-        :param u: node u
-        :param v: node v
-        :param common_neighbors: Set of common neighbors
-        :param timestamp: Timestamp of the event
-        """
-        # Perform analysis on the common neighbors for community evolution.
-        pass
-
-    def print_communities(self):
-        """
-        Output the communities to a file.
-        """
-        for cid, nodes in self.communities.items():
-            self.status.write(f"Community {cid}: {len(nodes)} nodes\n")
+        self.status.write(u"Started! (%s) \n\n" % str(time.asctime(time.localtime(time.time()))))
         self.status.flush()
+
+        qr = PriorityQueue()
+
+        with open(self.filename, 'r') as f:
+            first_line = f.readline()
+
+        actual_time = datetime.datetime.fromtimestamp(float(first_line.split("\t")[2]))
+        last_break = actual_time
+        f.close()
+
+        count = 0
+
+        #################################################
+        #                   Main Cycle                  #
+        #################################################
+
+        f = open(self.filename)
+        for l in f:
+            l = l.split("\t")
+            self.added += 1
+            e = {}
+            u = int(l[0])
+            v = int(l[1])
+            dt = datetime.datetime.fromtimestamp(float(l[2]))
+            tags = l[3]
+            u["t"] = l[3]
+            v["t"] = l[3]
+            #print(tags)
+
+            e['weight'] = 1
+            e["u"] = l[0]
+            e["v"] = l[1]
+            e["t"] = l[3]
+            #print(e["t"])
+            # month = dt.month
+
+            #############################################
+            #               Observations                #
+            #############################################
+
+            gap = dt - last_break
+            dif = gap.days
+
+            if dif >= self.obs:
+                last_break = dt
+
+                print("New slice. Starting Day: %s" % dt)
+
+
+
+
+
+                self.status.write(u"Saving Slice %s: Starting %s ending %s - (%s)\n" %
+                                  (self.actual_slice, actual_time, dt,
+                                   str(time.asctime(time.localtime(time.time())))))
+
+                self.status.write(u"Edge Added: %d\tEdge removed: %d\n" % (self.added, self.removed))
+                self.added = 0
+                self.removed = 0
+
+                actual_time = dt
+                self.status.flush()
+
+                self.splits = gzip.open("%s/%s/Draft3/splitting-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
+                self.splits.write(self.spl.getvalue())
+                self.splits.flush()
+                self.splits.close()
+                self.spl = StringIO()
+
+                self.print_communities()
+                self.status.write(
+                    u"\nStarted Slice %s (%s)\n" % (self.actual_slice, str(datetime.datetime.now().time())))
+
+            if u == v:
+                continue
+
+            # Check if edge removal is required
+            if self.ttl != float('inf'):
+                qr.put((dt, (int(e['u']), int(e['v']), int(e['weight']), e['t'])))
+                #print("into queue")
+                self.remove(dt, qr)
+
+            if not self.g.has_node(u):
+                self.g.add_node(u)
+                self.g.nodes[u]['c_coms'] = {}  # central
+
+            if not self.g.has_node(v):
+                self.g.add_node(v)
+                self.g.nodes[v]['c_coms'] = {}
+
+            if self.g.has_edge(u, v):
+                w = self.g.adj[u][v]["weight"]
+                self.g.adj[u][v]["weight"] = w + e['weight']
+                self.g.adj[u][v]["t"] = e['t']
+                continue
+            else:
+                self.g.add_edge(u, v)
+                self.g.adj[u][v]["weight"] = e['weight']
+                self.g.adj[u][v]["t"] = e['t']
+
+            u_n = list(self.g.neighbors(u))
+            #self.representation.write("List of neighbours of %s: %s\n"%(u, u_n))
+            v_n = list(self.g.neighbors(v))
+            #self.representation.write("List of neighbours of %s: %s\n" %(v, v_n))
+
+            #############################################
+            #               Evolution                   #
+            #############################################
+
+            # new community of peripheral nodes (new nodes)
+            if len(u_n) > 1 and len(v_n) > 1:
+                common_neighbors = set(u_n) & set(v_n)
+                self.common_neighbors_analysis(u, v, common_neighbors,e['t'])
+
+            count += 1
+
+        #  Last writing
+        self.status.write(u"Slice %s: Starting %s ending %s - (%s)\n" %
+                          (self.actual_slice, actual_time, actual_time,
+                           str(time.asctime(time.localtime(time.time())))))
+        self.status.write(u"Edge Added: %d\tEdge removed: %d\n" % (self.added, self.removed))
+        self.added = 0
+        self.removed = 0
+
+        self.print_communities()
+        self.status.write(u"Finished! (%s)" % str(time.asctime(time.localtime(time.time()))))
+        self.status.flush()
+        self.status.close()
 
     @property
     def new_community_id(self):
