@@ -15,20 +15,22 @@ def send_file_over_socket(file_path, host='localhost', port=9999, delay=1):
     print(f"Connection from {client_address} established.")
 
     try:
-        with open(file_path, 'r') as file:
-            for line in file:
-                # Strip newline characters
-                data = line.strip()
+        while True:
+            with open(file_path, 'r') as file:
+                for line in file:
+                    # Strip newline characters
+                    data = line.strip()
 
-                if data:  # Send only non-empty lines
-                    message = data + '\n'
-                    print(f"Sending: {message}")
-                    client_socket.sendall(message.encode('utf-8'))
+                    if data:  # Send only non-empty lines
+                        message = data + '\n'
+                        print(f"Sending: {message}")
+                        client_socket.sendall(message.encode('utf-8'))
 
-                    # Add a delay to simulate streaming data
-                    time.sleep(delay)
+                        # Add a delay to simulate streaming data
+                        time.sleep(delay)
 
-        print("File transmission completed.")
+            # When the file has been fully read, print the message and start over
+            print("End of file reached. Restarting from the beginning...")
 
     except Exception as e:
         print(f"Error: {e}")
@@ -42,4 +44,5 @@ def send_file_over_socket(file_path, host='localhost', port=9999, delay=1):
 
 if __name__ == "__main__":
     file_path = "/home/bigdata/master/MEDES/NetworkSegment.txt"
+    # file_path = "/home/bigdata/master/MEDES/NetworkSegment_small.txt" smaller file for testing
     send_file_over_socket(file_path)
