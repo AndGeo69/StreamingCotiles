@@ -43,6 +43,6 @@ def send_file_over_socket(file_path, host='localhost', port=9999, delay=1):
 
 
 if __name__ == "__main__":
-    file_path = "/home/bigdata/master/MEDES/NetworkSegment.txt"
+    file_path = "/home/bigdata/PycharmProjects/SparkStreamingCotiles/spark/NetworkSegmentETiles30.txt"
     # file_path = "/home/bigdata/master/MEDES/NetworkSegment_small.txt" smaller file for testing
     send_file_over_socket(file_path)

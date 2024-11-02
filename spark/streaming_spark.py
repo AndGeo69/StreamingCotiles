@@ -5,25 +5,69 @@ import time
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import explode, split
+from pyspark.sql.types import StructType, StructField, StringType
+
 
 # Acts as the client, connecting to an open socket ready to receive data and process it
 def create_streaming_session():
+    global spark
     while True:
         try:
             # Initialize SparkSession
             spark = SparkSession.builder.appName("StreamingCOTILES").getOrCreate()
             spark.conf.set("spark.sql.shuffle.partitions", "2") # testing smalling partitions over the default 200
+
+            # schema = StructType([
+            #     StructField("action", StringType(), True),
+            #     StructField("nodeU", StringType(), True),
+            #     StructField("nodeV", StringType(), True),
+            #     StructField("timestamp", StringType(), True),
+            #     StructField("tags", StringType(), True)
+            # ]) # User defined schema not supported by TextSocketProvider - Keeping this to apply on kafka stream
+
+
             # Structured Streaming API
-            lines = spark.readStream.format('socket').option('host', 'localhost').option('port', '9999').load()
+            streamingDataFrame = spark.readStream.format('socket').option('host', 'localhost').option('port', '9999').load()
+
+            streamingDF = streamingDataFrame.selectExpr(
+                "split(value, '\t')[0] as action",
+                "split(value, '\t')[1] as nodeU",
+                "split(value, '\t')[2] as nodeV",
+                "split(value, '\t')[3] as timestamp",
+                "split(value, '\t')[4] as tags"
+            )
+
+            # schema = ["action", "nodeU", "nodeV", "timestamp", "tags"] # hardcoded schema for now
+            #
+            # streamingDF = streamingDataFrame.selectExpr(
+            #     [f"split(value, '\t')[{i}] as {schema[i]}" for i in range(len(schema))]
+            # )
+            # Example of a line tab-delimited "+    29	45503	1280970074	linux,arch-linux,dns,cache"
+            # 1st: action, "+" add or "-" remove edge
+            # 2nd: edge nodeU (u)
+            # 3rd: edge nodeV (v)
+            # 4th: timestamp - event time
+            # 5th: tags (comma-separated)
+            # The tags are applied on both edges
+
+            # firstColumn = streamingDF.select()
+
+            query = streamingDF.writeStream.outputMode("append").format("console").trigger(processingTime='1 second').start()
+
+
+            # streamingDF = streamingDataFrame.selectExpr("CAST(value AS STRING)") \
+            #     .rdd.map(lambda row: row[0].split("\t")) \
+            #     .toDF(["node1", "node2", "timestamp", "tags"])
+
 
             # Split and process words
-            words = lines.select(explode(split(lines.value, '\t')).alias('word'))
+            # words = streamingDataFrame.select(explode(split(streamingDataFrame.value, '\t')).alias('word'))
 
             # Count words
-            wordCounts = words.groupBy('word').count()
+            # wordCounts = words.groupBy('word').count()
 
             # Start streaming query
-            query = wordCounts.writeStream.outputMode('complete').format('console').trigger(processingTime='500 milliseconds').start()
+            # query = wordCounts.writeStream.outputMode('complete').format('console').trigger(processingTime='1 second').start()
 
             # Await termination
             query.awaitTermination()

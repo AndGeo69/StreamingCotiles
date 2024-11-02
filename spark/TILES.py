@@ -115,11 +115,6 @@ class TILES:
                 last_break = dt
 
                 print("New slice. Starting Day: %s" % dt)
-
-
-
-
-
                 self.status.write(u"Saving Slice %s: Starting %s ending %s - (%s)\n" %
                                   (self.actual_slice, actual_time, dt,
                                    str(time.asctime(time.localtime(time.time())))))
