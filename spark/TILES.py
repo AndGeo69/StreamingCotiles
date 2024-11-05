@@ -28,39 +28,39 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, IntegerType, TimestampType
 
 
-class TILES:
+class TILES(object):
     """
-    TILES: Algorithm for evolutionary community discovery with streaming support
+        TILES
+        Algorithm for evolutionary community discovery
     """
 
-    def __init__(self, stream=None, g=nx.Graph(), ttl=float('inf'), obs=7, path="", start=None, end=None):
+    def __init__(self, filename=None, g=nx.Graph(), ttl=float('inf'), obs=7, path="", start=None, end=None):
         """
-        Constructor
-        :param g: networkx graph
-        :param ttl: edge time to live (days)
-        :param obs: observation window (days)
-        :param path: Path where to generate the results and find the edge file
-        :param start: starting date
-        :param end: ending date
+            Constructor
+            :param g: networkx graph
+            :param ttl: edge time to live (days)
+            :param obs: observation window (days)
+            :param path: Path where generate the results and find the edge file
+            :param start: starting date
+            :param end: ending date
         """
         self.path = path
         self.ttl = ttl
         self.cid = 0
         self.actual_slice = 0
         self.g = g
+        self.splits = None
+        self.spl = StringIO()
         self.base = os.getcwd()
-        self.status = open(f"{self.base}/{path}/extraction_status.txt", "w")
-        self.representation = open(f"{self.base}/{path}/representation.txt", "w")
+        self.status = open("%s/%s/extraction_status.txt" % (self.base, path), "w")
+        self.representation = open("%s/%s/representation.txt" % (self.base, path), "w")
         self.removed = 0
         self.added = 0
+        self.filename = filename
         self.start = start
         self.end = end
         self.obs = obs
         self.communities = {}
-
-        self.stream = stream
-
-        self.edge_buffer = []
 
     def execute(self):
         """
@@ -115,6 +115,7 @@ class TILES:
                 last_break = dt
 
                 print("New slice. Starting Day: %s" % dt)
+
                 self.status.write(u"Saving Slice %s: Starting %s ending %s - (%s)\n" %
                                   (self.actual_slice, actual_time, dt,
                                    str(time.asctime(time.localtime(time.time())))))
@@ -191,6 +192,7 @@ class TILES:
         self.status.write(u"Finished! (%s)" % str(time.asctime(time.localtime(time.time()))))
         self.status.flush()
         self.status.close()
+
 
     @property
     def new_community_id(self):

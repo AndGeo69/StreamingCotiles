@@ -1,8 +1,10 @@
 import socket
 import time
+from math import trunc
+
 
 # Acts as a server, streaming the txt file content to an open socket
-def send_file_over_socket(file_path, host='localhost', port=9999, delay=1):
+def send_file_over_socket(file_path, host='localhost', port=9999, delay=4):
     # Create a socket object
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((host, port))
@@ -14,32 +16,48 @@ def send_file_over_socket(file_path, host='localhost', port=9999, delay=1):
     client_socket, client_address = server_socket.accept()
     print(f"Connection from {client_address} established.")
 
-    try:
-        while True:
-            with open(file_path, 'r') as file:
-                for line in file:
-                    # Strip newline characters
-                    data = line.strip()
 
-                    if data:  # Send only non-empty lines
-                        message = data + '\n'
-                        print(f"Sending: {message}")
-                        client_socket.sendall(message.encode('utf-8'))
+    while True:
+        try:
+            # Wait for a client to connect
+            client_socket, client_address = server_socket.accept()
+            print(f"Connection from {client_address} established.")
 
-                        # Add a delay to simulate streaming data
-                        time.sleep(delay)
+            try:
+                with client_socket:  # Use a context manager to handle the client socket
+                    while True:
+                        with open(file_path, 'r') as file:
+                            for line in file:
+                                # Strip newline characters
+                                data = line.strip()
 
-            # When the file has been fully read, print the message and start over
-            print("End of file reached. Restarting from the beginning...")
+                                if data:  # Send only non-empty lines
+                                    message = data + '\n'
+                                    try:
+                                        print(f"Sending: {message}")
+                                        client_socket.sendall(message.encode('utf-8'))
+                                        # Add a delay to simulate streaming data
+                                        time.sleep(delay)
+                                    except BrokenPipeError:
+                                        print(f"Client disconnected while sending data.")
+                                        break  # Exit the inner loop to handle client disconnection
 
-    except Exception as e:
-        print(f"Error: {e}")
+                        # When the file has been fully read, print the message and start over
+                        print("End of file reached. Restarting from the beginning...")
+                        file.seek(0)  # Reset the file pointer to the beginning
 
-    finally:
-        # Close the sockets
-        client_socket.close()
-        server_socket.close()
-        print("Connection closed.")
+            except (ConnectionResetError, ConnectionAbortedError):
+                print(f"Client disconnected. Waiting for a new client...")
+                # Continue to listen for new connections
+
+        except Exception as e:
+            print(f"Error: {e}")
+
+    # finally:
+    #     # Close the sockets
+    #     client_socket.close()
+    #     server_socket.close()
+    #     print("Connection closed.")
 
 
 if __name__ == "__main__":
