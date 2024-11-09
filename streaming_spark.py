@@ -4,7 +4,7 @@ import sys
 import time
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import explode, split
+from pyspark.sql.functions import explode, split, col
 from pyspark.sql.types import StructType, StructField, StringType
 
 from spark.applied.TILES import TILES
@@ -22,13 +22,16 @@ def create_streaming_session():
             # Structured Streaming API
             streamingDataFrame = spark.readStream.format('socket').option('host', 'localhost').option('port', '9999').load()
 
-            streamingDF = streamingDataFrame.selectExpr(
+            streamingDF = (streamingDataFrame.selectExpr(
                 "split(value, '\t')[0] as action",
                 "split(value, '\t')[1] as nodeU",
                 "split(value, '\t')[2] as nodeV",
                 "split(value, '\t')[3] as timestamp",
                 "split(value, '\t')[4] as tags"
-            )
+            ).withColumn("nodeU", col("nodeU").cast("int"))
+            .withColumn("nodeV", col("nodeV").cast("int"))
+            .withColumn("timestamp", col("timestamp").cast("timestamp")))
+
 
             # Example of a line tab-delimited
             # "+    29	45503	1280970074	linux,arch-linux,dns,cache"
@@ -46,9 +49,9 @@ def create_streaming_session():
             print("streamingDF IsStreaming: " + streamingDF.isStreaming.__str__())
 
             (streamingDF.writeStream.foreachBatch(tiles_instance.execute)
-                                         .outputMode("append")
-                                         .start()
-                                         .awaitTermination())
+                                        .outputMode("append")
+                                        .start()
+                                        .awaitTermination())
 
 
             # query = streamingDF.writeStream.outputMode("append").format("console").trigger(processingTime='5 second').start()
