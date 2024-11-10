@@ -30,7 +30,7 @@ def create_streaming_session():
                 "split(value, '\t')[4] as tags"
             ).withColumn("nodeU", col("nodeU").cast("int"))
             .withColumn("nodeV", col("nodeV").cast("int"))
-            .withColumn("timestamp", col("timestamp").cast("timestamp")))
+            .withColumn("timestamp", col("timestamp").cast("int")))
 
 
             # Example of a line tab-delimited

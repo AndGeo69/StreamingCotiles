@@ -5,7 +5,7 @@ import time
 
 import networkx as nx
 from pyspark.sql import functions as F
-from pyspark.sql.functions import min
+from pyspark.sql.functions import min, acosh
 from pyspark.sql.types import IntegerType
 
 if sys.version_info > (2, 7):
@@ -54,6 +54,7 @@ class TILES:
 
         self.last_break = None  # Initialize last_break as None to indicate first batch
         self.actual_time = None  # Initialize actual_time to be set during first batch
+        self.sliceCount = 0
 
     def executeTest(self, batch_df: DataFrame, batch_id: int):
         print("processing batch " + batch_id.__str__())
@@ -69,38 +70,12 @@ class TILES:
         # Priority queue for TTL handling
         qr = PriorityQueue()
 
-        batch_df.show()
         if batch_df.isEmpty():
             return
 
-        if self.actual_time is None and self.last_break is None:
-            # Calculate the minimum timestamp in the batch, if needed only once
-            min_timestamp_df = batch_df.select(min("timestamp").alias("min_timestamp"))
+        batch_df.sort(batch_df.timestamp)
+        # batch_df.show()
 
-            # Assign values if the DataFrame is not empty
-            min_timestamp = min_timestamp_df.collect()[0]["min_timestamp"]
-            if min_timestamp is not None:
-                self.actual_time = datetime.datetime.fromtimestamp(float(min_timestamp))
-                self.last_break = self.actual_time
-
-        # Apply transformations to process each row in the micro-batch
-        self.added += 1
-        e = {}
-
-
-        batch_df = batch_df.withColumn("dt", F.from_unixtime(F.col("timestamp")))
-        last_break_timestamp = F.lit(self.last_break.timestamp())
-        if batch_df.filter(F.col("timestamp").isNotNull()):
-            batch_df = batch_df.withColumn("gap", F.col("timestamp") - last_break_timestamp)
-            batch_df = batch_df.withColumn("dif", (F.col("gap") / 86400).cast(IntegerType()))  # Convert seconds to days
-        else:
-            print("No valid timestamps in this batch. Skipping 'dif' computation.")
-
-
-        # if self.last_break is not None:
-        #     last_break_timestamp = F.lit(self.last_break.timestamp())
-        #     batch_df = batch_df.withColumn("gap", F.col("timestamp") - last_break_timestamp)
-        #     batch_df = batch_df.withColumn("dif", (F.col("gap") / 86400).cast(IntegerType()))  # Convert seconds to days
 
         batch_df = batch_df \
             .withColumn("e_u", F.col("nodeU")) \
@@ -108,27 +83,52 @@ class TILES:
             .withColumn("e_weight", F.lit(1)) \
             .withColumn("e_t", F.col("tags"))
 
-        print("batch_df:")
-        batch_df.show()
+
+        # creating slices - logic needed
+        if self.actual_time is None and self.last_break is None:
+            min_timestamp_df = batch_df.select(min("timestamp").alias("min_timestamp"))
+            first_min_timestamp = min_timestamp_df.first()["min_timestamp"]
+            if first_min_timestamp is not None:
+                self.actual_time = datetime.datetime.fromtimestamp(float(first_min_timestamp))
+                self.last_break = self.actual_time
+                print(f"First timestamp received {self.actual_time}, timestamp {first_min_timestamp.__str__}")
+
+        self.added += 1
+        e = {}
+
+        batch_df = batch_df.withColumn("dt", F.col("timestamp"))
+
+        if self.last_break is not None:
+            batch_df = batch_df.withColumn("gap", (F.col("timestamp") - F.lit(self.last_break.timestamp())))
+            batch_df = batch_df.withColumn("dif", (F.col("gap") / 86400).cast("int"))  # Convert seconds to days
+
+
+        # print("batch_df:")
+        # batch_df.show()
 
         if F.col("dif").isNotNull:
             new_slice_df = batch_df.filter(F.col("dif") >= self.obs)
 
-            print("new_slice_df:")
-            new_slice_df.show()
+            # print("new_slice_df:")
+            # new_slice_df.show()
             if not new_slice_df.isEmpty():
-                last_break_timestamp = new_slice_df.agg(F.max("timestamp")).collect()[0][0]
-                self.last_break = datetime.fromtimestamp(float(last_break_timestamp))
-                self.actual_time = last_break_timestamp
+                # new_slice_df.show(truncate=False)  # debug print
 
-                print(f"New slice detected in batch {batch_id}:")
-                new_slice_df.show(truncate=False)  # Print rows for detailed debugging
+                # Update last_break and actual_time to the latest timestamp in this slice
+                max_timestamp = new_slice_df.agg(F.max("timestamp")).collect()[0][0]
+                self.last_break = datetime.datetime.fromtimestamp(max_timestamp)
+                print(f"~ old actual_time = {self.actual_time}")
+                self.actual_time = self.last_break
+                self.sliceCount += 1
+                print(f"New slice detected starting from {self.actual_time}. Processed batch {batch_id}. Slice Count: {self.sliceCount}")
+                print(f"~ NEW actual_time = {self.actual_time}")
+                print("~~ do something now that a slice is detected\n")
 
         # new_slice_df.foreach(lambda row: handle_new_slice(row, self.status))
-
-        max_dt = batch_df.agg(F.max("dt")).collect()[0][0]
-        if max_dt:
-            self.last_break = max_dt
+        #
+        # max_dt = batch_df.agg(F.max("dt")).collect()[0][0]
+        # if max_dt:
+        #     self.last_break = max_dt
 
         # u = batch_df.select("nodeU")
         # v = batch_df.select("nodeV")
