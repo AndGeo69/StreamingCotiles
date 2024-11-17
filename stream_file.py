@@ -4,7 +4,7 @@ from math import trunc
 
 
 # Acts as a server, streaming the txt file content to an open socket
-def send_file_over_socket(file_path, host='localhost', port=9999, delay=0.01):
+def send_file_over_socket(file_path, host='localhost', port=9999, delay=1):
     # Create a socket object
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((host, port))

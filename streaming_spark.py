@@ -16,7 +16,8 @@ def create_streaming_session():
     while True:
         try:
             # Initialize SparkSession
-            spark = SparkSession.builder.appName("StreamingCOTILES").getOrCreate()
+            spark = (SparkSession.builder.appName("StreamingCOTILES")
+                     .config("spark.jars.packages","graphframes:graphframes:0.8.3-spark3.4-s_2.12").getOrCreate())
             spark.conf.set("spark.sql.shuffle.partitions", "2") # testing smalling partitions over the default 200
 
             # Structured Streaming API
@@ -42,7 +43,7 @@ def create_streaming_session():
             # 5th: tags (comma-separated)
             # The tags are applied on both edges
 
-            tiles_instance = TILES(stream=streamingDF)
+            tiles_instance = TILES(stream=streamingDF, spark=spark)
 
             streamingDF.printSchema()
 

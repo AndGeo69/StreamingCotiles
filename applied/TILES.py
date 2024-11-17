@@ -3,10 +3,9 @@ import os
 import sys
 import time
 
-import networkx as nx
+from graphframes import GraphFrame
 from pyspark.sql import functions as F
-from pyspark.sql.functions import min, acosh
-from pyspark.sql.types import IntegerType
+from pyspark.sql.functions import min
 
 if sys.version_info > (2, 7):
     from queue import PriorityQueue
@@ -23,21 +22,13 @@ from pyspark.sql import DataFrame
 
 
 class TILES:
-    def __init__(self, stream=None, g=nx.Graph(), ttl=float('inf'), obs=7, path="", start=None, end=None):
-        """
-        Constructor
-        :param g: networkx graph
-        :param ttl: edge time to live (days)
-        :param obs: observation window (days)
-        :param path: Path where to generate the results and find the edge file
-        :param start: starting date
-        :param end: ending date
-        """
+    def __init__(self, stream=None, spark=None,  ttl=float('inf'), obs=7, path="", start=None, end=None):
         self.path = path
         self.ttl = ttl
         self.cid = 0
         self.actual_slice = 0
-        self.g = g
+        self.g = None
+        self.spark = spark
         self.base = os.getcwd()
         self.status = open(f"{self.base}/{path}/extraction_status.txt", "w")
         self.representation = open(f"{self.base}/{path}/representation.txt", "w")
@@ -56,9 +47,6 @@ class TILES:
         self.actual_time = None  # Initialize actual_time to be set during first batch
         self.sliceCount = 0
 
-    def executeTest(self, batch_df: DataFrame, batch_id: int):
-        print("processing batch " + batch_id.__str__())
-        batch_df.show()
 
     def execute(self, batch_df: DataFrame, batch_id):
         """
@@ -117,12 +105,82 @@ class TILES:
                 # Update last_break and actual_time to the latest timestamp in this slice
                 max_timestamp = new_slice_df.agg(F.max("timestamp")).collect()[0][0]
                 self.last_break = datetime.datetime.fromtimestamp(max_timestamp)
-                print(f"~ old actual_time = {self.actual_time}")
+                # print(f"~ old actual_time = {self.actual_time}")
                 self.actual_time = self.last_break
                 self.sliceCount += 1
-                print(f"New slice detected starting from {self.actual_time}. Processed batch {batch_id}. Slice Count: {self.sliceCount}")
+                # print(f"New slice detected starting from {self.actual_time}. Processed batch {batch_id}. Slice Count: {self.sliceCount}")
                 print(f"~ NEW actual_time = {self.actual_time}")
-                print("~~ do something now that a slice is detected\n")
+                # print("~~ do something now that a slice is detected\n")
+
+        theDataframe = batch_df.filter(F.col("nodeU") != F.col("nodeV"))
+
+        #1 TODO remove_edge
+        # to_remove_df = theDataframe.filter(F.col("action") == "-")
+
+        new_nodes_u = theDataframe.select(F.col("nodeU").alias("id"))
+        new_nodes_v = theDataframe.select(F.col("nodeV").alias("id"))
+
+        new_nodes = new_nodes_u.union(new_nodes_v).withColumn("c_coms", F.array()).distinct()
+        new_edges = theDataframe.select(F.col("nodeU").alias("src"), F.col("nodeV").alias("dst"), F.col("timestamp"), F.col("tags"), F.lit(1).alias("weight"))
+
+
+        # Check if the GraphFrame already exists (initialized in the driver)
+        if not self.g:
+            self.g = GraphFrame(new_nodes, new_edges)
+        else:
+            # Merge with existing vertices and edges
+            existing_vertices = self.g.vertices
+            existing_edges = self.g.edges
+
+            new_nodes_to_add = new_nodes.join(existing_vertices, on="id", how="left_anti")
+            new_edges_to_add = new_edges.join(existing_edges, on=["src", "dst"], how="left_anti")
+
+            # Update the graph if there are new nodes or edges
+            if not new_nodes_to_add.isEmpty() or not new_edges_to_add.isEmpty():
+                self.g = GraphFrame(
+                    self.g.vertices.union(new_nodes_to_add),
+                    self.g.edges.union(new_edges_to_add)
+                )
+
+        self.g.vertices.show(truncate=False)
+
+        # 3. Process edges (Add new edges or update existing edges)
+        new_edges = theDataframe.select(F.col("nodeU").alias("src"),
+                                        F.col("nodeV").alias("dst"),
+                                        F.col("timestamp"), F.col("tags"),
+                                        F.lit(1).alias("weight"))
+
+        # Add or update the edges in the GraphFrame
+        if hasattr(self, 'g'):
+            # Join new edges with existing edges to find updates
+            existing_edges = self.g.edges
+
+            # Fix column naming ambiguity after the join
+            updated_edges = existing_edges.join(new_edges,
+                (existing_edges.src == new_edges.src) & (existing_edges.dst == new_edges.dst),
+                "left"
+            ).withColumn("weight",
+                F.when(F.col("new_edges.weight").isNotNull(),
+                       F.col("existing_edges.weight") + F.col("new_edges.weight"))
+                .otherwise(F.col("existing_edges.weight"))
+            ).select(
+                F.col("src"), F.col("dst"), F.col("timestamp"), F.col("tags"), F.col("weight")
+            )
+
+            # Add edges that don't exist in the graph yet
+            added_edges = new_edges.join(
+                existing_edges,
+                (new_edges.src == existing_edges.src) & (new_edges.dst == existing_edges.dst),
+                "anti"
+            )
+
+            # Update the graph with new edges (ensure the schema is consistent)
+            self.g = GraphFrame(self.g.vertices, updated_edges.union(added_edges))
+
+        # Show the updated edges (debugging)
+        self.g.edges.show(truncate=False)
+
+        to_add_df = theDataframe.filter(F.col("action") != "-")
 
         # new_slice_df.foreach(lambda row: handle_new_slice(row, self.status))
         #
