@@ -121,25 +121,31 @@ class TILES:
         new_nodes_v = theDataframe.select(F.col("nodeV").alias("id"))
 
         new_nodes = new_nodes_u.union(new_nodes_v).withColumn("c_coms", F.array()).distinct()
-        new_edges = theDataframe.select(F.col("nodeU").alias("src"), F.col("nodeV").alias("dst"), F.col("timestamp"), F.col("tags"), F.lit(1).alias("weight"))
+        new_edges = theDataframe.select(F.col("nodeU").alias("src"),
+                                        F.col("nodeV").alias("dst"),
+                                        F.col("timestamp"),
+                                        F.col("tags"),
+                                        F.lit(1).alias("weight"))
 
 
         # Check if the GraphFrame already exists (initialized in the driver)
         if not self.g:
             self.g = GraphFrame(new_nodes, new_edges)
         else:
-            # Merge with existing vertices and edges
-            existing_vertices = self.g.vertices
-            existing_edges = self.g.edges
 
-            new_nodes_to_add = new_nodes.join(existing_vertices, on="id", how="left_anti")
-            new_edges_to_add = new_edges.join(existing_edges, on=["src", "dst"], how="left_anti")
+            # TODO Do the following only on "+"
+            # Merge with existing vertices and edges
+            # existing_vertices = self.g.vertices
+            # existing_edges = self.g.edges
+
+            # new_nodes_to_add = new_nodes.join(existing_vertices, on="id", how="left_anti")
+            # new_edges_to_add = new_edges.join(existing_edges, on=["src", "dst"], how="left_anti")
 
             # Update the graph if there are new nodes or edges
-            if not new_nodes_to_add.isEmpty() or not new_edges_to_add.isEmpty():
+            if not new_nodes.isEmpty() or not new_edges.isEmpty():
                 self.g = GraphFrame(
-                    self.g.vertices.union(new_nodes_to_add),
-                    self.g.edges.union(new_edges_to_add)
+                    self.g.vertices.union(new_nodes),
+                    self.g.edges.union(new_edges)
                 )
 
         self.g.vertices.show(truncate=False)
@@ -149,131 +155,104 @@ class TILES:
                                         F.col("nodeV").alias("dst"),
                                         F.col("timestamp"), F.col("tags"),
                                         F.lit(1).alias("weight"))
-
+        new_edges.show()
         # Add or update the edges in the GraphFrame
         if hasattr(self, 'g'):
+            self.g = update_graph_with_edges(self.g, new_edges)
             # Join new edges with existing edges to find updates
-            existing_edges = self.g.edges
-
-            # Fix column naming ambiguity after the join
-            updated_edges = existing_edges.join(new_edges,
-                (existing_edges.src == new_edges.src) & (existing_edges.dst == new_edges.dst),
-                "left"
-            ).withColumn("weight",
-                F.when(F.col("new_edges.weight").isNotNull(),
-                       F.col("existing_edges.weight") + F.col("new_edges.weight"))
-                .otherwise(F.col("existing_edges.weight"))
-            ).select(
-                F.col("src"), F.col("dst"), F.col("timestamp"), F.col("tags"), F.col("weight")
-            )
-
-            # Add edges that don't exist in the graph yet
-            added_edges = new_edges.join(
-                existing_edges,
-                (new_edges.src == existing_edges.src) & (new_edges.dst == existing_edges.dst),
-                "anti"
-            )
-
-            # Update the graph with new edges (ensure the schema is consistent)
-            self.g = GraphFrame(self.g.vertices, updated_edges.union(added_edges))
+            # existing_edges = self.g.edges
+            #
+            # # Fix column naming ambiguity after the join
+            # updated_edges = existing_edges.join(new_edges,
+            #     (existing_edges.src == new_edges.src) & (existing_edges.dst == new_edges.dst),
+            #     "left"
+            # ).withColumn("weight",
+            #     F.when(F.col("new_edges.weight").isNotNull(),
+            #            F.col("existing_edges.weight") + F.col("new_edges.weight"))
+            #     .otherwise(F.col("existing_edges.weight"))
+            # ).select(
+            #     F.col("src"), F.col("dst"), F.col("timestamp"), F.col("tags"), F.col("weight")
+            # )
+            #
+            # # Add edges that don't exist in the graph yet
+            # added_edges = new_edges.join(
+            #     existing_edges,
+            #     (new_edges.src == existing_edges.src) & (new_edges.dst == existing_edges.dst),
+            #     "anti"
+            # )
+            #
+            # # Update the graph with new edges (ensure the schema is consistent)
+            # self.g = GraphFrame(self.g.vertices, updated_edges.union(added_edges))
 
         # Show the updated edges (debugging)
+        print("graph edges:")
         self.g.edges.show(truncate=False)
+        print("graph nodes:")
+        self.g.vertices.show(truncate=False)
 
         to_add_df = theDataframe.filter(F.col("action") != "-")
 
-        # new_slice_df.foreach(lambda row: handle_new_slice(row, self.status))
-        #
-        # max_dt = batch_df.agg(F.max("dt")).collect()[0][0]
-        # if max_dt:
-        #     self.last_break = max_dt
+def update_graph_with_edges(graph, new_edges):
+    """
+    Update the GraphFrame with the new edges, adding or updating as necessary.
 
-        # u = batch_df.select("nodeU")
-        # v = batch_df.select("nodeV")
-        # dt = datetime.datetime.fromtimestamp(float(batch_df['timestamp']))
-        # tags = batch_df['tags']
-        # e['weight'] = 1
-        # e["u"] = u
-        # e["v"] = v
-        # e["t"] = tags
-        #
-        # # Observations
-        # gap = dt - self.last_break
-        # dif = gap.days
-        #
-        # # Create a new slice if the observation window has passed
-        # if dif >= self.obs:
-        #     self.last_break = dt
-        #     print("New slice. Starting Day: %s" % dt)
-        #     self.status.write(u"Saving Slice %s: Starting %s ending %s - (%s)\n" %
-        #                       (self.actual_slice, self.actual_time, dt,
-        #                        str(time.asctime(time.localtime(time.time())))))
-        #
-        #     self.status.write(u"Edge Added: %d\tEdge removed: %d\n" % (self.added, self.removed))
-        #     self.added = 0
-        #     self.removed = 0
-        #
-        #     self.actual_time = dt
-        #     self.status.flush()
-        #
-        #     self.splits = gzip.open("%s/%s/Draft3/splitting-%d.gz" % (self.base, self.path, self.actual_slice),
-        #                             "wt", 3)
-        #     self.splits.write(self.spl.getvalue())
-        #     self.splits.flush()
-        #     self.splits.close()
-        #     self.spl = StringIO()
-        #
-        #     # self.print_communities()
-        #     self.status.write(
-        #         u"\nStarted Slice %s (%s)\n" % (self.actual_slice, str(datetime.datetime.now().time())))
-        #
-        # if u == v:
-        #     return
-        #
-        # # Edge removal based on TTL
-        # if self.ttl != float('inf'):
-        #     qr.put((dt, (int(e['u']), int(e['v']), int(e['weight']), e['t'])))
-        #     # self.remove(dt, qr)
-        #
-        # # Add nodes if they don’t exist in the graph
-        # if not self.g.has_node(u):
-        #     self.g.add_node(u)
-        #     self.g.nodes[u]['c_coms'] = {}  # central
-        #
-        # if not self.g.has_node(v):
-        #     self.g.add_node(v)
-        #     self.g.nodes[v]['c_coms'] = {}
-        #
-        # # Update or add the edge in the graph
-        # if self.g.has_edge(u, v):
-        #     w = self.g.adj[u][v]["weight"]
-        #     self.g.adj[u][v]["weight"] = w + e['weight']
-        #     self.g.adj[u][v]["t"] = e['t']
-        # else:
-        #     self.g.add_edge(u, v)
-        #     self.g.adj[u][v]["weight"] = e['weight']
-        #     self.g.adj[u][v]["t"] = e['t']
-        #
-        # # Neighbor analysis
-        # u_n = list(self.g.neighbors(u))
-        # v_n = list(self.g.neighbors(v))
-        #
-        # # Evolution analysis
-        # if len(u_n) > 1 and len(v_n) > 1:
-        #     common_neighbors = set(u_n) & set(v_n)
-        #     # self.common_neighbors_analysis(u, v, common_neighbors, e['t'])
-        #
-        # # Final slice update
-        # self.status.write(u"Slice %s: Starting %s ending %s - (%s)\n" %
-        #                   (self.actual_slice, self.actual_time, self.actual_time,
-        #                    str(time.asctime(time.localtime(time.time())))))
-        # self.status.write(u"Edge Added: %d\tEdge removed: %d\n" % (self.added, self.removed))
-        # self.added = 0
-        # self.removed = 0
-        #
-        # # self.print_communities()
-        # self.status.write(u"Finished! (%s)" % str(time.asctime(time.localtime(time.time()))))
-        # self.status.flush()
-        # self.status.close()
+    :param graph: The current GraphFrame (self.g)
+    :param new_edges: DataFrame containing new edges (src, dst, timestamp, tags, weight)
+    :return: Updated GraphFrame
+    """
+    # Current edges in the graph
+    existing_edges = graph.edges.alias("existing")
 
+    # Alias the new edges DataFrame
+    new_edges = new_edges.alias("new")
 
+    # Update existing edges: sum weights and update timestamps/tags
+    updated_edges = existing_edges.join(
+        new_edges,
+        (F.col("existing.src") == F.col("new.src")) & (F.col("existing.dst") == F.col("new.dst")),
+        "left_outer"
+    ).select(
+        F.col("existing.src"),
+        F.col("existing.dst"),
+        (F.col("existing.weight") + F.col("new.weight")).alias("weight"),
+        F.col("new.timestamp").alias("timestamp"),
+        F.col("new.tags").alias("tags")
+    )
+
+    # Add new edges: those not present in the current edges
+    added_edges = new_edges.join(
+        existing_edges,
+        (F.col("new.src") == F.col("existing.src")) & (F.col("new.dst") == F.col("existing.dst")),
+        "anti"
+    ).select(
+        F.col("new.src"),
+        F.col("new.dst"),
+        F.col("new.weight").alias("weight"),
+        F.col("new.timestamp"),
+        F.col("new.tags")
+    )
+
+    print('updated_edges:')
+    updated_edges.show()
+
+    print('added_edged:')
+    added_edges.show()
+    # Combine updated and added edges
+    final_edges = updated_edges.unionByName(added_edges)
+
+    print('final_edges:')
+    final_edges.show()
+
+    # Return a new GraphFrame with updated edges
+    return GraphFrame(graph.vertices, final_edges)
+
+def has_edge(self, u, v):
+    """
+    Checks if an edge exists between node `u` and node `v` in a GraphFrame.
+
+    :param u: Source node ID
+    :param v: Destination node ID
+    :return: True if the edge exists, False otherwise
+    """
+    edge_exists = self.g.edges.filter((F.col("src") == u) & (F.col("dst") == v)).count() > 0
+    return edge_exists
