@@ -1,1 +1,2 @@
-from tiles.alg import *
+from .TILES import TILES
+from .eTILES import eTILES
