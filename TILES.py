@@ -1,17 +1,21 @@
+"""
+    Created on 11/feb/2015
+    @author: Giulio Rossetti
+"""
+import networkx as nx
+import gzip
 import datetime
-import os
-import string
-import sys
 import time
+from future.utils import iteritems
+import os
+from collections import Counter
 
-from graphframes import GraphFrame
-from networkx.classes import Graph, common_neighbors
-from pyspark.sql import functions as F
-from pyspark.sql.functions import min
-
+import sys
 if sys.version_info > (2, 7):
+    from io import StringIO
     from queue import PriorityQueue
 else:
+    from cStringIO import StringIO
     from Queue import PriorityQueue
 
 
@@ -20,359 +24,566 @@ __contact__ = "giulio.rossetti@gmail.com"
 __website__ = "about.giuliorossetti.net"
 __license__ = "BSD"
 
-from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, StructField, IntegerType, TimestampType
 
 
-class TILES:
-    def __init__(self, stream=None, spark=None,  ttl=float('inf'), obs=7, path="", start=None, end=None):
+class TILES(object):
+    """
+        TILES
+        Algorithm for evolutionary community discovery
+    """
+
+    def __init__(self, filename=None, g=nx.Graph(), ttl=float('inf'), obs=7, path="", start=None, end=None):
+        """
+            Constructor
+            :param g: networkx graph
+            :param ttl: edge time to live (days)
+            :param obs: observation window (days)
+            :param path: Path where generate the results and find the edge file
+            :param start: starting date
+            :param end: ending date
+        """
         self.path = path
         self.ttl = ttl
         self.cid = 0
         self.actual_slice = 0
-        self.g: GraphFrame = None
-        self.communityTagsDf: DataFrame = None
-        self.communitiesDf: DataFrame = None
-        self.spark = spark
+        self.g = g
+        self.splits = None
+        self.spl = StringIO()
         self.base = os.getcwd()
-        self.status = open(f"{self.base}/{path}/extraction_status.txt", "w")
-        self.representation = open(f"{self.base}/{path}/representation.txt", "w")
+        self.status = open("%s/%s/extraction_status.txt" % (self.base, path), "w")
+        self.representation = open("%s/%s/representation.txt" % (self.base, path), "w")
         self.removed = 0
         self.added = 0
+        self.filename = filename
         self.start = start
         self.end = end
         self.obs = obs
         self.communities = {}
 
-        self.stream = stream
-
-        self.edge_buffer = []
-
-        self.last_break = None  # Initialize last_break as None to indicate first batch
-        self.actual_time = None  # Initialize actual_time to be set during first batch
-        self.sliceCount = 0
-
-
-    def execute(self, batch_df: DataFrame, batch_id):
+    def execute(self):
         """
-        Execute TILES algorithm on streaming data using foreachBatch.
+            Execute TILES algorithm
         """
         self.status.write(u"Started! (%s) \n\n" % str(time.asctime(time.localtime(time.time()))))
         self.status.flush()
 
-        # Priority queue for TTL handling
         qr = PriorityQueue()
 
-        if batch_df.isEmpty():
+        with open(self.filename, 'r') as f:
+            first_line = f.readline()
+
+        actual_time = datetime.datetime.fromtimestamp(float(first_line.split("\t")[2]))
+        last_break = actual_time
+        f.close()
+
+        count = 0
+
+        #################################################
+        #                   Main Cycle                  #
+        #################################################
+
+        f = open(self.filename)
+        for l in f:
+            l = l.split("\t")
+            self.added += 1
+            e = {}
+            u = int(l[0])
+            v = int(l[1])
+            dt = datetime.datetime.fromtimestamp(float(l[2]))
+            tags = l[3]
+            u["t"] = l[3]
+            v["t"] = l[3]
+            #print(tags)
+
+            e['weight'] = 1
+            e["u"] = l[0]
+            e["v"] = l[1]
+            e["t"] = l[3]
+            #print(e["t"])
+            # month = dt.month
+
+            #############################################
+            #               Observations                #
+            #############################################
+
+            gap = dt - last_break
+            dif = gap.days
+
+            if dif >= self.obs:
+                last_break = dt
+
+                print("New slice. Starting Day: %s" % dt)
+
+                self.status.write(u"Saving Slice %s: Starting %s ending %s - (%s)\n" %
+                                  (self.actual_slice, actual_time, dt,
+                                   str(time.asctime(time.localtime(time.time())))))
+
+                self.status.write(u"Edge Added: %d\tEdge removed: %d\n" % (self.added, self.removed))
+                self.added = 0
+                self.removed = 0
+
+                actual_time = dt
+                self.status.flush()
+
+                self.splits = gzip.open("%s/%s/Draft3/splitting-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
+                self.splits.write(self.spl.getvalue())
+                self.splits.flush()
+                self.splits.close()
+                self.spl = StringIO()
+
+                self.print_communities()
+                self.status.write(
+                    u"\nStarted Slice %s (%s)\n" % (self.actual_slice, str(datetime.datetime.now().time())))
+
+            if u == v:
+                continue
+
+            # Check if edge removal is required
+            if self.ttl != float('inf'):
+                qr.put((dt, (int(e['u']), int(e['v']), int(e['weight']), e['t'])))
+                #print("into queue")
+                self.remove(dt, qr)
+
+            if not self.g.has_node(u):
+                self.g.add_node(u)
+                self.g.nodes[u]['c_coms'] = {}  # central
+
+            if not self.g.has_node(v):
+                self.g.add_node(v)
+                self.g.nodes[v]['c_coms'] = {}
+
+            if self.g.has_edge(u, v):
+                w = self.g.adj[u][v]["weight"]
+                self.g.adj[u][v]["weight"] = w + e['weight']
+                self.g.adj[u][v]["t"] = e['t']
+                continue
+            else:
+                self.g.add_edge(u, v)
+                self.g.adj[u][v]["weight"] = e['weight']
+                self.g.adj[u][v]["t"] = e['t']
+
+            u_n = list(self.g.neighbors(u))
+            #self.representation.write("List of neighbours of %s: %s\n"%(u, u_n))
+            v_n = list(self.g.neighbors(v))
+            #self.representation.write("List of neighbours of %s: %s\n" %(v, v_n))
+
+            #############################################
+            #               Evolution                   #
+            #############################################
+
+            # new community of peripheral nodes (new nodes)
+            if len(u_n) > 1 and len(v_n) > 1:
+                common_neighbors = set(u_n) & set(v_n)
+                self.common_neighbors_analysis(u, v, common_neighbors,e['t'])
+
+            count += 1
+
+        #  Last writing
+        self.status.write(u"Slice %s: Starting %s ending %s - (%s)\n" %
+                          (self.actual_slice, actual_time, actual_time,
+                           str(time.asctime(time.localtime(time.time())))))
+        self.status.write(u"Edge Added: %d\tEdge removed: %d\n" % (self.added, self.removed))
+        self.added = 0
+        self.removed = 0
+
+        self.print_communities()
+        self.status.write(u"Finished! (%s)" % str(time.asctime(time.localtime(time.time()))))
+        self.status.flush()
+        self.status.close()
+
+
+    @property
+    def new_community_id(self):
+        """
+            Return a new community identifier
+            :return: new community id
+        """
+        self.cid += 1
+        self.communities[self.cid] = {}
+        return self.cid
+
+    def remove(self, actual_time, qr):
+        """
+            Edge removal procedure
+            :param actual_time: timestamp of the last inserted edge
+            :param qr: Priority Queue containing the edges to be removed ordered by their timestamps
+        """
+
+        coms_to_change = {}
+        at = actual_time
+
+        # main cycle on the removal queue
+        if not qr.empty():
+
+            t = qr.get()
+            timestamp = t[0]
+            e = (t[1][0],  t[1][1], t[1][2], t[1][3])
+
+            delta = at - timestamp
+            displacement = delta.days
+
+            if displacement < self.ttl:
+                qr.put((timestamp, t[1]))
+
+            else:
+                while self.ttl <= displacement:
+
+                    self.removed += 1
+                    u = int(e[0])
+                    v = int(e[1])
+                    u["t"]=e[3]
+                    t = e[3]
+                    if self.g.has_edge(u, v):
+
+                        w = self.g.adj[u][v]["weight"]
+
+                        # decreasing link weight if greater than one
+                        # (multiple occurrence of the edge: remove only the oldest)
+                        if w > 1:
+                            self.g.adj[u][v]["weight"] = w - 1
+                            e = (u,  v, w-1, t)
+                            #print(e)
+                            qr.put((at, e))
+
+                        else:
+                            # u and v shared communities
+                            if len(list(self.g.neighbors(u))) > 1 and len(list(self.g.neighbors(v))) > 1:
+                                coms = set(self.g.nodes[u]['c_coms'].keys()) & set(self.g.nodes[v]['c_coms'].keys())
+
+                                for c in coms:
+                                    if c not in coms_to_change:
+                                        cn = set(self.g.neighbors(u)) & set(self.g.neighbors(v))
+                                        coms_to_change[c] = [u, v]
+                                        coms_to_change[c].extend(list(cn))
+                                    else:
+                                        cn = set(self.g.neighbors(u)) & set(self.g.neighbors(v))
+                                        coms_to_change[c].extend(list(cn))
+                                        coms_to_change[c].extend([u, v])
+                                        ctc = set(coms_to_change[c])
+                                        coms_to_change[c] = list(ctc)
+                            else:
+                                if len(list(self.g.neighbors(u))) < 2:
+                                    coms_u = [x for x in self.g.nodes[u]['c_coms'].keys()]
+                                    for cid in coms_u:
+                                        self.remove_from_community(u, cid)
+
+                                if len(list(self.g.neighbors(v))) < 2:
+                                    coms_v = [x for x in self.g.nodes[v]['c_coms'].keys()]
+                                    for cid in coms_v:
+                                        self.remove_from_community(v, cid)
+
+                            self.g.remove_edge(u, v)
+
+                    if not qr.empty():
+
+                        t = qr.get()
+
+                        timestamp = t[0]
+                        delta = at - timestamp
+                        displacement = delta.days
+
+                        e = t[1]
+
+        # update of shared communities
+        self.update_shared_coms(coms_to_change, t)
+
+    def update_shared_coms(self, coms_to_change, tags):
+        # update of shared communities
+        for c in coms_to_change:
+            if c not in self.communities:
+                continue
+
+            c_nodes = self.communities[c].keys()
+
+            if len(c_nodes) > 3:
+
+                sub_c = self.g.subgraph(c_nodes)
+                c_components = nx.number_connected_components(sub_c)
+
+                # unbroken community
+                if c_components == 1:
+                    to_mod = sub_c.subgraph(coms_to_change[c])
+                    self.modify_after_removal(to_mod, c, tags)
+
+                # broken community: bigger one maintains the id, the others obtain a new one
+                else:
+                    new_ids = []
+
+                    first = True
+                    components = nx.connected_components(sub_c)
+                    for com in components:
+                        if first:
+                            if len(com) < 3:
+                                self.destroy_community(c)
+                            else:
+                                to_mod = list(set(com) & set(coms_to_change[c]))
+                                sub_c = self.g.subgraph(to_mod)
+                                self.modify_after_removal(sub_c, c, tags)
+                            first = False
+
+                        else:
+                            if len(com) > 3:
+                                # update the memberships: remove the old ones and add the new one
+                                to_mod = list(set(com) & set(coms_to_change[c]))
+                                sub_c = self.g.subgraph(to_mod)
+
+                                central = self.centrality_test(sub_c).keys()
+                                if len(central) >= 3:
+                                    actual_id = self.new_community_id
+                                    new_ids.append(actual_id)
+                                    for n in central:
+                                        self.add_to_community(n, actual_id, tags)
+                                       # self.representation.write(
+                                        #    "------------------------------Add %s to community %s-----------------------------------" % (
+                                         #   n, actual_id))
+
+
+                    # splits
+                    if len(new_ids) > 0 and self.actual_slice > 0:
+                        self.spl.write(u"%s\t%s\n" % (c, str(new_ids)))
+            else:
+                self.destroy_community(c)
+
+    def modify_after_removal(self, sub_c, c, tags):
+        """
+            Maintain the clustering coefficient invariant after the edge removal phase
+            :param sub_c: sub-community to evaluate
+            :param c: community id
+        """
+        central = self.centrality_test(sub_c).keys()
+
+        # in case of previous splits, update for the actual nodes
+        remove_node = set(self.communities[c].keys()) - set(sub_c.nodes())
+
+        for rm in remove_node:
+            self.remove_from_community(rm, c, tags)
+
+        if len(central) < 3:
+            self.destroy_community(c)
+        else:
+            not_central = set(sub_c.nodes()) - set(central)
+            for n in not_central:
+                self.remove_from_community(n, c, tags)
+
+    def common_neighbors_analysis(self, u, v, common_neighbors, tags):
+        """
+            General case in which both the nodes are already present in the net.
+            :param u: a node
+            :param v: a node
+            :param common_neighbors: common neighbors of the two nodes
+        """
+
+
+        # no shared neighbors
+        if len(common_neighbors) < 1:
             return
 
-        batch_df.sort(batch_df.timestamp)
-
-        batch_df = batch_df \
-            .withColumn("e_u", F.col("nodeU")) \
-            .withColumn("e_v", F.col("nodeV")) \
-            .withColumn("e_weight", F.lit(1)) \
-            .withColumn("e_t", F.col("tags"))
-
-
-        # creating slices - logic needed
-        if self.actual_time is None and self.last_break is None:
-            min_timestamp_df = batch_df.select(min("timestamp").alias("min_timestamp"))
-            first_min_timestamp = min_timestamp_df.first()["min_timestamp"]
-            if first_min_timestamp is not None:
-                self.actual_time = datetime.datetime.fromtimestamp(float(first_min_timestamp))
-                self.last_break = self.actual_time
-                print(f"First timestamp received {self.actual_time}, timestamp {first_min_timestamp.__str__}")
-
-        self.added += 1
-
-        batch_df = batch_df.withColumn("dt", F.col("timestamp"))
-
-        if self.last_break is not None:
-            batch_df = batch_df.withColumn("gap", (F.col("timestamp") - F.lit(self.last_break.timestamp())))
-            batch_df = batch_df.withColumn("dif", (F.col("gap") / 86400).cast("int"))  # Convert seconds to days
-
-        if F.col("dif").isNotNull:
-            new_slice_df = batch_df.filter(F.col("dif") >= self.obs)
-
-            # print("new_slice_df:")
-            # new_slice_df.show()
-            if not new_slice_df.isEmpty():
-                # new_slice_df.show(truncate=False)  # debug print
-
-                # Update last_break and actual_time to the latest timestamp in this slice
-                max_timestamp = new_slice_df.agg(F.max("timestamp")).collect()[0][0]
-                self.last_break = datetime.datetime.fromtimestamp(max_timestamp)
-                # print(f"~ old actual_time = {self.actual_time}")
-                self.actual_time = self.last_break
-                self.sliceCount += 1
-                # print(f"New slice detected starting from {self.actual_time}. Processed batch {batch_id}. Slice Count: {self.sliceCount}")
-                print(f"~ NEW actual_time = {self.actual_time}")
-                # print("~~ do something now that a slice is detected\n")
-
-        theDataframe = batch_df.filter(F.col("nodeU") != F.col("nodeV"))
-
-        to_remove_df = theDataframe.filter(F.col("action") == "-")
-
-        # 1 TODO remove_edge
-        # remove_edge_from_graph(self.g, to_remove_df)
-
-        new_nodes_u = theDataframe.select(F.col("nodeU").alias("id"))
-        new_nodes_v = theDataframe.select(F.col("nodeV").alias("id"))
-        new_nodes = new_nodes_u.union(new_nodes_v).withColumn("c_coms", F.array()).distinct()
-
-        new_edges = theDataframe.select(F.col("nodeU").alias("src"),
-                                        F.col("nodeV").alias("dst"),
-                                        F.col("timestamp"),
-                                        F.col("tags"),
-                                        F.lit(1).alias("weight"))
-
-
-        # Check if the GraphFrame already exists (initialized in the driver)
-        if not self.g:
-            self.g: GraphFrame = GraphFrame(new_nodes, new_edges)
         else:
-            # Get existing vertices from the current graph
-            existing_vertices = self.g.vertices.alias("existing")
-
-            # Perform a left anti-join to find new nodes not already in the graph
-            new_nodes_to_add = new_nodes.alias("new").join(
-                existing_vertices,
-                on="id",
-                how="left_anti"
-            )
-            # If there are new nodes to add, update the GraphFrame vertices
-            if not new_nodes_to_add.isEmpty():
-                print("new_nodes_to_add - nodes that are new:")
-                new_nodes_to_add.show()
-                updated_vertices = self.g.vertices.union(new_nodes_to_add)
-                self.g = GraphFrame(updated_vertices, self.g.edges)
-
-            print("new data (edges)")
-            new_edges.show(truncate= False)
-            print("new data (nodes)")
-            new_nodes.show(truncate= False)
-
-        print("before theDataframe")
-        print("graph edges:")
-        self.g.edges.show(truncate=False)
-        print("graph vertices:")
-        self.g.vertices.show(truncate=False)
-
-        # Add or update the edges in the GraphFrame
-        if hasattr(self, 'g'): # TODO change this hasattr
-            self.g = update_graph_with_edges(self.g, new_edges)
-
-        common_neighbors = evolution(self.g, new_edges)
-        printTrace("Common Neighbors:", common_neighbors)
-
-        common_neighbors_analysis(self.g, common_neighbors)
 
 
-        # Show the updated edges (debugging)
-        print("graph edges:")
-        self.g.edges.show(truncate=False)
-        print("graph nodes:")
-        self.g.vertices.show(truncate=False)
+            shared_coms = set(self.g.nodes[v]['c_coms'].keys()) & set(self.g.nodes[u]['c_coms'].keys())
+            #self.representation.write("...............................Shared communities of %s and %s are: %s\n"%(u, v, shared_coms))
+            only_u = set(self.g.nodes[u]['c_coms'].keys()) - set(self.g.nodes[v]['c_coms'].keys())
+            #self.representation.write("...............................Communities where only %s belongs:  %s\n"%(u, only_u))
+            only_v = set(self.g.nodes[v]['c_coms'].keys()) - set(self.g.nodes[u]['c_coms'].keys())
+            #self.representation.write("...............................Communities where only %s belongs:  %s\n"%(v, only_v))
+            #print(" ")
+            # community propagation: a community is propagated iff at least two of [u, v, z] are central
+            propagated = False
 
-def common_neighbors_analysis(graph: GraphFrame, common_neighbors: DataFrame):
-    if not common_neighbors or common_neighbors.count() < 1: # TODO Check if this count works in the DF
-        return
+            for z in common_neighbors:
+                for c in self.g.nodes[z]['c_coms'].keys():
+                    #if c in only_v and len(only_v) < 5:
+                    if c in only_v:
+                        self.add_to_community(u, c, tags )
+                        #self.representation.write("------------------------------Add %s to community %s-----------------------------------\n"%(u,c))
+                        propagated = True
 
+                    #if c in only_u and len(only_u)<5:
+                    if c in only_u:
+                        self.add_to_community(v, c, tags )
+                        #self.representation.write("------------------------------Add %s to community %s-----------------------------------\n" % (
+                          #  v, c))
+                        propagated = True
 
+                for c in shared_coms:
+                    if c not in self.g.nodes[z]['c_coms']:
+                        self.add_to_community(z, c, tags )
+                        propagated = True
 
+            else:
+                if not propagated:
+                    # new community
+                    #self.representation.write("Not propagated\n")
+                    actual_cid = self.new_community_id
+                    self.add_to_community(u, actual_cid, tags )
+                    #self.representation.write("------------------------------Add %s to community %s-----------------------------------\n" % (
+    #                        u, actual_cid))
+                    self.add_to_community(v, actual_cid, tags )
+                    #self.representation.write("------------------------------Add %s to community %s-----------------------------------\n" % (
+                       # v, actual_cid))
 
-def add_to_community(self, node, community_id, tags):
-    """
-    Adds a node to a community in a streaming-friendly way using DataFrames.
+                    for z in common_neighbors:
+                        self.add_to_community(z, actual_cid, tags )
+                        #self.representation.write(
+                         #   "------------------------------Add %s to community %s-----------------------------------\n" % (
+                          #      z, actual_cid))
 
-    Args:
-        node (str): Node to be added to the community.
-        community_id (str): ID of the community.
-        tags (str): Tags associated with the community, comma-separated.
-    """
-    # Create a DataFrame for the new community tag entry
-    new_tags = self.communityTagsDf.sparkSession.createDataFrame(
-        [(community_id, tags.split(','))],
-        schema=["community_id", "tags"]
-    )
+    def print_communities(self):
+        """
+            Print the actual communities
+        """
 
-    # Update communityTagsDf by unioning new tags and deduplicating
-    updated_communityTagsDf = (
-        self.communityTagsDf.unionByName(new_tags)
-        .groupBy("community_id")
-        .agg(F.flatten(F.collect_list("tags")).alias("tags"))
-    )
+        out_file_coms = gzip.open("%s/%s/strong-communities-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
+        com_string = StringIO()
 
-    # Create a DataFrame for the new community-node mapping
-    new_community = self.communitiesDf.sparkSession.createDataFrame(
-        [(community_id, node)],
-        schema=["community_id", "node"]
-    )
-
-    # Update communitiesDf by unioning new entries and deduplicating
-    updated_communitiesDf = self.communitiesDf.unionByName(new_community).distinct()
-
-    if not self.communityTagsDf:
-        self.communityTagsDf = updated_communityTagsDf
-    else:
-        self.communityTagsDf.unionByName(updated_communityTagsDf)
-
-    printTrace("communityTagsDf:", self.communityTagsDf)
-
-    if not self.communitiesDf:
-        self.communitiesDf = updated_communitiesDf
-    else:
-        self.communitiesDf.unionByName(updated_communitiesDf)
-
-    printTrace("communitiesDf:", self.communitiesDf)
-
-
-def evolution(graph: GraphFrame, edge_updates: DataFrame):
-    """
-    Analyze common neighbors for nodes in updated edges and handle evolution.
-    Args:
-        graph (GraphFrame): Current GraphFrame representing the graph.
-        edge_updates (DataFrame): New edges added in the current batch, with columns ['src', 'dst'].
-    Returns:
-        DataFrame: Common neighbors for the given edges.
-    """
-
-    # Extract neighbors for both source (u) and destination (v)
-    neighbors = graph.edges.select(
-        F.col("src").alias("node"),
-        F.col("dst").alias("neighbor")
-    ).union(
-        graph.edges.select(
-            F.col("dst").alias("node"),
-            F.col("src").alias("neighbor")
-        )
-    )
-
-    # Calculate neighbor counts for all nodes
-    neighbor_counts = neighbors.groupBy("node").agg(F.count("neighbor").alias("neighbor_count"))
-
-    # Filter for nodes with more than one neighbor (u_n and v_n conditions)
-    valid_neighbors = neighbor_counts.filter(F.col("neighbor_count") > 1).select("node")
-
-    # Join edges with valid nodes to ensure u and v both meet the condition
-    valid_edges = (
-        edge_updates.alias("edges")
-        .join(valid_neighbors.alias("valid_u"), F.col("edges.src") == F.col("valid_u.node"))
-        .join(valid_neighbors.alias("valid_v"), F.col("edges.dst") == F.col("valid_v.node"))
-    )
-
-    # Find common neighbors for valid (u, v) pairs
-    common_neighbors = (
-        valid_edges
-        .join(neighbors.alias("u_neighbors"), F.col("edges.src") == F.col("u_neighbors.node"), "inner")
-        .join(neighbors.alias("v_neighbors"), F.col("edges.dst") == F.col("v_neighbors.node"), "inner")
-        .filter(F.col("u_neighbors.neighbor") == F.col("v_neighbors.neighbor"))
-        .select(
-            F.col("edges.src").alias("node_u"),
-            F.col("edges.dst").alias("node_v"),
-            F.col("u_neighbors.neighbor").alias("common_neighbor")
-        )
-        .groupBy("node_u", "node_v")
-        .agg(F.collect_set("common_neighbor").alias("common_neighbors"))
-    )
-
-    return common_neighbors
+        nodes_to_coms = {}
+        merge = {}
+        coms_to_remove = []
+        drop_c = []
 
 
-def remove_edge_from_graph(graph:GraphFrame, df_to_remove: DataFrame):
-# TODO revisit
-    existing_edges = graph.edges.alias("existing")
-    edges_to_remove = df_to_remove.alias("remove")
-    printTrace("existing edge", existing_edges)
-    printTrace("edges to remove", edges_to_remove)
+        self.status.write(u"Writing Communities (%s)\n" % str(time.asctime(time.localtime(time.time()))))
+        self.status.flush()
+        for idc, comk in iteritems(self.communities):
 
-    # has_edge but in dataframes
-    removed_edges = existing_edges.join(
-        edges_to_remove,
-        (F.col("existing.src") == F.col("remove.nodeU")) &
-        (F.col("existing.dst") == F.col("remove.nodeV")),
-        "inner"
-    ).select("existing.src", "existing.dst")
+            com = comk.keys()
 
-    printTrace("removed edges:", removed_edges)
+            if self.communities[idc] is not None:
+                if len(com) > 2:
+                    key = tuple(sorted(com))
 
-    printTrace("graph.vertices:", graph.vertices)
+                    # Collision check and merge index build (maintaining the lowest id)
+                    if key not in nodes_to_coms:
+                        nodes_to_coms[key] = idc
+                    else:
+                        old_id = nodes_to_coms[key]
+                        drop = idc
+                        if idc < old_id:
+                            drop = old_id
+                            nodes_to_coms[key] = idc
 
-    shared_communities = graph.vertices.alias("u").join(
-        graph.vertices.alias("v"),
-        (F.col("u.id") == removed_edges["src"]) & (F.col("v.id") == removed_edges["dst"])
-    ).select(
-        F.array_intersect(F.col("u.c_coms"), F.col("v.c_coms")).alias("shared_coms"),
-        F.col("u.id").alias("src"),
-        F.col("v.id").alias("dst")
-    )
+                        # merged to remove
+                        coms_to_remove.append(drop)
+                        if not nodes_to_coms[key] in merge:
+                            merge[nodes_to_coms[key]] = [idc]
+                        else:
+                            merge[nodes_to_coms[key]].append(idc)
+                else:
+                    drop_c.append(idc)
+            else:
+                drop_c.append(idc)
 
-    printTrace("shared_coms", shared_communities)
+        write_count = 0
+        for k, idk in iteritems(nodes_to_coms):
+            write_count += 1
+            if write_count % 50000 == 0:
+                out_file_coms.write(com_string.getvalue())
+                out_file_coms.flush()
+                com_string = StringIO()
+                write_count = 0
+            com_string.write(u"%d\t%s\t\t%s\t%s\t\t'%s\n" % (idk, str(list(k)), len(dict(Counter(self.CommunityTags[idk]))), len(self.CommunityTags[idk]),  dict(Counter(self.CommunityTags[idk]).most_common())))
 
-    neighbors_u = existing_edges.filter(F.col("src") == removed_edges["src"]).select("dst")
-    neighbors_v = existing_edges.filter(F.col("src") == removed_edges["dst"]).select("dst")
+        for dc in drop_c:
+            self.destroy_community(dc)
 
-    common_neighbors = neighbors_u.intersect(neighbors_v)
+        out_file_coms.write(com_string.getvalue())
+        out_file_coms.flush()
+        out_file_coms.close()
 
-    coms_to_change = shared_communities.withColumn(
-        "affected_nodes",
-        F.array_union(F.array(F.col("src"), F.col("dst")), common_neighbors)
-    )
+        # write the graph
+        self.status.write(u"Writing actual graph status (%s)\n" % str(time.asctime(time.localtime(time.time()))))
+        self.status.flush()
+        out_file_graph = gzip.open("%s/%s/graph-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
+        g_string = StringIO()
+        for e in self.g.edges():
+            g_string.write(u"%d\t%s\t%d\t%s\n" % (e[0], e[1], self.g.adj[e[0]][e[1]]['weight'], self.g.adj[e[0]][e[1]]['t']))
 
-    return
+        out_file_graph.write(g_string.getvalue())
+        out_file_graph.flush()
+        out_file_graph.close()
+
+        # Write merge status
+        self.status.write(u"Writing merging file (%s)\n" % str(time.asctime(time.localtime(time.time()))))
+        self.status.flush()
+        out_file_merge = gzip.open("%s/%s/merging-%d.gz" % (self.base, self.path, self.actual_slice), "wt", 3)
+        m_string = StringIO()
+        for comid, c_val in iteritems(merge):
+            # maintain minimum community after merge
+            c_val.append(comid)
+            k = min(c_val)
+            c_val.remove(k)
+            m_string.write(u"%d\t%s\n" % (k, str(c_val)))
+        out_file_merge.write(m_string.getvalue())
+        out_file_merge.flush()
+        out_file_merge.close()
+
+        # Community Cleaning
+        m = 0
+        for c in coms_to_remove:
+            self.destroy_community(c)
+            m += 1
+
+        self.status.write(u"Merged communities: %d (%s)\n" % (m, str(time.asctime(time.localtime(time.time())))))
+
+        self.actual_slice += 1
+        self.status.write(u"Total Communities %d (%s)\n" % (len(self.communities.keys()),
+                                                           str(time.asctime(time.localtime(time.time())))))
+        self.status.flush()
+
+    def destroy_community(self, cid):
+        nodes = [x for x in self.communities[cid].keys()]
+        #for n in nodes:
+            #self.remove_from_community(n, cid, tg)
+        self.communities.pop(cid, None)
+
+    def add_to_community(self, node, cid, tag):
+
+        flag = 1
+        for x in tag.split(','):
+            for tg in tag.split(','):
+                self.CommunityTags[cid].append(tg)
+            flag = 1
+            # print(self.CommunityTags[cid])
+
+        if flag == 1:
+            self.g.nodes[node]['c_coms'][cid] = None
+            if cid in self.communities:
+                self.communities[cid][node] = None
+            else:
+                self.communities[cid] = {node: None}
+
+    def remove_from_community(self, node, cid, tags):
+        if cid in self.g.nodes[node]['c_coms']:
+            self.g.nodes[node]['c_coms'].pop(cid, None)
+            for tg in tags.split(','):
+                if tg in self.CommunityTags[cid]:
+                    self.CommunityTags[cid].remove(tg)
+            if cid in self.communities and node in self.communities[cid]:
+                self.communities[cid].pop(node, None)
 
 
-def printTrace(str: string, df: DataFrame):
-    print(str)
-    df.show()
+    def centrality_test(self, subgraph):
+        central = {}
 
-def update_graph_with_edges(graph, new_edges):
-    # Current edges in the graph
-    existing_edges = graph.edges.alias("existing")
-
-    # Alias the new edges DataFrame
-    new_edges = new_edges.alias("new")
-
-    print("existing_edges:")
-    existing_edges.show()
-    print("new_edges:")
-    new_edges.show()
-    # Update existing edges: sum weights and update timestamps/tags
-    updated_edges = existing_edges.join(
-        new_edges,
-        (F.col("existing.src") == F.col("new.src")) & (F.col("existing.dst") == F.col("new.dst")),
-        "inner"
-    ).select(
-        F.col("existing.src").alias("src"),
-        F.col("existing.dst").alias("dst"),
-        (F.col("existing.weight") + F.col("new.weight")).alias("weight"),
-        F.col("new.timestamp").alias("timestamp"),
-        F.col("new.tags").alias("tags")
-    )
-
-    # Add new edges: those not present in the current edges
-    added_edges = new_edges.join(
-        existing_edges,
-        (F.col("new.src") == F.col("existing.src")) & (F.col("new.dst") == F.col("existing.dst")),
-        "anti"
-    ).select(
-        F.col("new.src").alias("src"),
-        F.col("new.dst").alias("dst"),
-        F.col("new.weight").alias("weight"),
-        F.col("new.timestamp").alias("timestamp"),
-        F.col("new.tags").alias("tags")
-    )
-
-    print('updated_edges:')
-    updated_edges.show()
-
-    print('added_edged:')
-    added_edges.show()
-    # Combine updated and added edges
-    final_edges = updated_edges.unionByName(added_edges)
-
-    print('final_edges:')
-    final_edges.show()
-
-    # Return a new GraphFrame with updated edges
-    return GraphFrame(graph.vertices, final_edges)
+        for u in subgraph.nodes():
+            if u not in central:
+                cflag = False
+                neighbors_u = set(self.g.neighbors(u))
+                if len(neighbors_u) > 1:
+                    for v in neighbors_u:
+                        if u > v:
+                            if cflag:
+                                break
+                            else:
+                                neighbors_v = set(self.g.neighbors(v))
+                                cn = neighbors_v & neighbors_v
+                                if len(cn) > 0:
+                                    central[u] = None
+                                    central[v] = None
+                                    for n in cn:
+                                        central[n] = None
+                                    cflag = True
+        return central

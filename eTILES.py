@@ -8,7 +8,13 @@ import gzip
 import datetime
 import time
 import copy
+
+from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType
+
+
 from .TILES import TILES
+
 
 
 import sys
@@ -71,7 +77,6 @@ class eTILES(TILES):
             u = int(l[1])
             v = int(l[2])
             dt = datetime.datetime.fromtimestamp(float(l[3]))
-
             t = l[4]
 
             e['weight'] = 1
@@ -89,7 +94,6 @@ class eTILES(TILES):
 
             if dif >= self.obs:
                 last_break = dt
-
 
                 print("New slice. Starting Day: %s" % dt)
 
