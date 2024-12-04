@@ -167,7 +167,7 @@ class TILES:
         common_neighbors = detect_common_neighbors(self, new_edges)
         printTrace("Common Neighbors:", common_neighbors)
 
-        # common_neighbors_analysis(self, common_neighbors)
+        common_neighbors_analysis(self, new_edges, common_neighbors)
 
 
         # Show the updated edges (debugging)
@@ -177,7 +177,7 @@ class TILES:
         self.g.vertices.show(truncate=False)
 
 
-def common_neighbors_analysis(self, common_neighbors):
+def common_neighbors_analysis(self, new_edges:DataFrame, common_neighbors:DataFrame):
     """
     Analyze and update communities for nodes with common neighbors in a streaming manner.
 
@@ -191,6 +191,11 @@ def common_neighbors_analysis(self, common_neighbors):
     # self.community_memberships = (self.g.vertices.select(
     #     F.col("id").alias("node_id")).withColumn("community_id",F.lit(None))
     #                               .withColumn("tags", F.array()))
+
+    shared_coms = (new_edges.alias("new_edges")
+                   .join(self.g.vertices, on=F.col("new_edges.src") == F.col("id"), how="left")
+                   .join(self.g.vertices, on=F.col("new_edges.dst") == F.col("id"), how="left"))
+
 
     # Use g.vertices A OR g.nodes V
     self.community_memberships = self.g.vertices.select(
@@ -269,9 +274,10 @@ def add_to_community(self, node, community_id, tags):
         tags (str): Tags associated with the community, comma-separated.
     """
     # Create a DataFrame for the new community tag entry
-    new_tags = self.communityTagsDf.sparkSession.createDataFrame(
-        [(community_id, tags.split(','))],
-        schema=["community_id", "tags"]
+    if not self.communityTagsDf:
+        new_tags = self.communityTagsDf.sparkSession.createDataFrame(
+            [(community_id, tags.split(','))],
+            schema=["community_id", "tags"]
     )
 
     # Update communityTagsDf by unioning new tags and deduplicating
