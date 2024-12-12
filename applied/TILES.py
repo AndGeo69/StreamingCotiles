@@ -256,13 +256,6 @@ def common_neighbors_analysis(self, new_edges:DataFrame, common_neighbors:DataFr
                    .join(self.g.vertices.alias("vertices_v"),
                          on=F.col("common_neighbors.dst") == F.col("vertices_v.id"), how="left"))
 
-    # Might not need new_edges at all since i have the information in common_neighbors !!! <------
-    # shared_coms = (new_edges.alias("new_edges")
-    #                .join(self.g.vertices.alias("vertices_u"),
-    #                      on=F.col("new_edges.src") == F.col("vertices_u.id"), how="left")
-    #                .join(self.g.vertices.alias("vertices_v"),
-    #                      on=F.col("new_edges.dst") == F.col("vertices_v.id"), how="left"))
-
     # Step 1: Extract the communities for each node
     # We need to explicitly select the 'c_coms' from both vertices_u and vertices_v
     shared_coms = shared_coms.withColumn("src_coms", F.col("vertices_u.c_coms"))
@@ -298,127 +291,55 @@ def common_neighbors_analysis(self, new_edges:DataFrame, common_neighbors:DataFr
 
     printTrace("shared_coms", shared_coms)
 
-    # # Join common neighbors with src_coms and dst_coms
-    # shared_coms_with_neighbors = shared_coms.join(
-    #     common_neighbors_exploded,
-    #     (F.col("shared_coms_src") == F.col("common_neighbor")) |
-    #     (F.col("shared_coms_dst") == F.col("common_neighbor")),
-    #     how="inner"
-    # ).filter(
-    #     (F.col("shared_coms_src") == F.col("common_neighbor")) | (F.col("shared_coms_dst") == F.col("common_neighbor"))
-    # )
-
     # Propagate 'src' logic: Propagate src if 'common_neighbor' is in 'only_v'
-    propagated_src = shared_coms.withColumn(
-        "propagated_src",
-        F.when(F.array_contains(F.col("only_v"), F.col("common_neighbors")), True).otherwise(False)
+    propagated = shared_coms.withColumn(
+        "propagated",
+        F.when(
+            F.expr(
+                "size(array_intersect(common_neighbors, only_v)) > 0 OR"
+                " size(array_intersect(common_neighbors, only_u)) > 0"),
+            True
+        ).otherwise(False)
     )
     #  TODO check common_neighbors list might need an exploded one
-
-    # Propagate 'dst' logic: Propagate dst if 'common_neighbor' is in 'only_u'
-    propagated_dst = shared_coms.withColumn(
-        "propagated_dst",
-        F.when(F.array_contains(F.col("only_u"), F.col("common_neighbors")), True).otherwise(False)
-    )
-
-    printTrace("propagated_src", propagated_src)
-    printTrace("propagated_dst", propagated_dst)
-
-    # Combine the propagated community updates
-    propagated = propagated_src.union(propagated_dst).distinct()
 
     printTrace("propagated", propagated)
 
     new_communities = propagated.withColumn("community_id", F.monotonically_increasing_id())
+
+    printTrace("new_communities", new_communities)
+
+    nodesToBeAddedToCom = (new_communities.filter("propagated = false")
+                               .select(
+                                    F.col("shared_coms_src"),
+                                    F.col("shared_coms_dst"),
+                                    F.col("timestamp"),
+                                    F.col("shared_coms_tags"),
+                                    F.col("community_id"),
+                            )
+                           )
+    prexistingCommunities = (new_communities.filter("propagated = true")
+                                .select(
+                                    F.col("shared_coms_src"),
+                                    F.col("shared_coms_dst"),
+                                    F.col("timestamp"),
+                                    F.col("shared_coms_tags"),
+                                    F.col("community_id"),
+                                )
+                            )
+
+    printTrace("node propagted FASLE", nodesToBeAddedToCom)
+    printTrace("node propagted TRUE", prexistingCommunities)
+
+    add_to_community(self, nodesToBeAddedToCom)
 
     # Step 4: Handle new communities if no propagation occurs TODO this
     # new_communities = common_neighbors_exploded.join(
     #     shared_coms, on=["src", "dst"], how="left_anti"
     # ).withColumn("community_id", F.monotonically_increasing_id())
 
-    new_communities_updates = new_communities.select(
-        F.col("src").alias("node_id"), "community_id"
-    ).union(new_communities.select(
-        F.col("dst").alias("node_id"), "community_id"
-    ))
 
-    # Combine all updates
-    all_updates = propagated.union(new_communities_updates).distinct()
-
-    # Step 5: Update the global community memberships DataFrame
-    self.community_memberships = self.community_memberships.union(all_updates).distinct()
-
-    # OLD IMPL. VVV
-
-    # Use g.vertices A OR g.nodes V
-    self.community_memberships = self.g.vertices.select(
-        F.col("id").alias("node_id"),
-        F.explode(F.col("c_coms")).alias("community_id") # Each community as a separate row
-    )
-
-    common_neighbors_exploded =\
-        common_neighbors.withColumn("common_neighbor", F.explode(F.col("common_neighbors")))
-
-    # Join to find the communities of src, dst, and common neighbors
-    cn_coms = self.community_memberships.alias("cn_coms").join(
-        common_neighbors_exploded, F.col("cn_coms.node_id") == F.col("common_neighbor"), how="inner"
-    )
-
-    # Alias the DataFrames for clarity
-    src_coms = self.community_memberships.alias("src_coms").join(
-        common_neighbors_exploded, F.col("src_coms.node_id") == F.col("node_u"), how="inner"
-    )
-    dst_coms = self.community_memberships.alias("dst_coms").join(
-        common_neighbors_exploded, F.col("dst_coms.node_id") == F.col("node_v"), how="inner"
-    )
-
-    # Join the DataFrames to identify shared communities, explicitly reference column names
-    shared_coms = src_coms.join(dst_coms, on="community_id", how="inner").select(
-        F.col("src_coms.node_id").alias("node_u"), F.col("dst_coms.node_id").alias("node_v"), "community_id"
-    )
-
-    # Identify unique communities for src and dst
-    only_src_coms = src_coms.join(dst_coms, on="community_id", how="left_anti").select(
-        F.col("src_coms.node_id").alias("node_u"), "community_id"
-    )
-    only_dst_coms = dst_coms.join(src_coms, on="community_id", how="left_anti").select(
-        F.col("dst_coms.node_id").alias("node_v"), "community_id"
-    )
-
-    # Add nodes to communities based on propagation rules
-    propagated_src = only_dst_coms.join(cn_coms, on="community_id", how="inner").select(
-        F.col("common_neighbor").alias("node_id"), "community_id"
-    )
-    printTrace("propagated_src", propagated_src)
-
-    propagated_dst = only_src_coms.join(cn_coms, on="community_id", how="inner").select(
-        F.col("common_neighbor").alias("node_id"), "community_id"
-    )
-
-    # Combine propagated updates
-    printTrace("propagated_dst", propagated_dst)
-    propagated = propagated_src.union(propagated_dst).distinct()
-
-    # Handle new communities if no propagation occurs
-    new_communities = common_neighbors_exploded.join(
-        shared_coms, on=["node_u", "node_v"], how="left_anti"
-    ).withColumn("community_id", F.monotonically_increasing_id())
-
-    new_communities_updates = new_communities.select(
-        F.col("node_u").alias("node_id"), "community_id"
-    )
-
-    printTrace("propagated", propagated)
-
-    # Combine all updates
-    all_updates = propagated.union(new_communities_updates)
-    printTrace("all_updates", all_updates)
-
-    # Update the global community memberships DataFrame
-    self.community_memberships = self.community_memberships.union(all_updates).distinct()
-
-
-def add_to_community(self, node, community_id, tags):
+def add_to_community(self, toBeAddedDf: DataFrame):
     """
     Adds a node to a community in a streaming-friendly way using DataFrames.
 
@@ -427,48 +348,56 @@ def add_to_community(self, node, community_id, tags):
         community_id (str): ID of the community.
         tags (str): Tags associated with the community, comma-separated.
     """
-    # Create a DataFrame for the new community tag entry
-    if not self.communityTagsDf:
-        new_tags = self.communityTagsDf.sparkSession.createDataFrame(
-            [(community_id, tags.split(','))],
-            schema=["community_id", "tags"]
+    src_tags = toBeAddedDf.select(
+        F.col("shared_coms_src").alias("nodeId"),
+        F.explode(F.split(F.col("shared_coms_tags"), ",")).alias("tag"),
+        F.col("community_id")
     )
 
-    # Update communityTagsDf by unioning new tags and deduplicating
-    updated_communityTagsDf = (
-        self.communityTagsDf.unionByName(new_tags)
-        .groupBy("community_id")
-        .agg(F.flatten(F.collect_list("tags")).alias("tags"))
+    # Explode the tags for shared_coms_dst
+    dst_tags = toBeAddedDf.select(
+        F.col("shared_coms_dst").alias("nodeId"),
+        F.explode(F.split(F.col("shared_coms_tags"), ",")).alias("tag"),
+        F.col("community_id")
     )
 
-    # Create a DataFrame for the new community-node mapping
-    new_community = self.communitiesDf.sparkSession.createDataFrame(
-        [(community_id, node)],
-        schema=["community_id", "node"]
-    )
+    new_entries = src_tags.union(dst_tags)
 
-    # Update communitiesDf by unioning new entries and deduplicating
-    updated_communitiesDf = self.communitiesDf.unionByName(new_community).distinct()
-
-    if not self.communityTagsDf:
-        self.communityTagsDf = updated_communityTagsDf
+    # If communityTagsDf is empty, initialize it; otherwise, append the new entries
+    if self.communityTagsDf is None:
+        self.communityTagsDf = new_entries
     else:
-        self.communityTagsDf.unionByName(updated_communityTagsDf)
+        self.communityTagsDf = self.communityTagsDf.union(new_entries)
 
-    printTrace("communityTagsDf:", self.communityTagsDf)
+    # Join communityTagsDf with vertices
+    updated_vertices = self.g.vertices.join(
+        self.communityTagsDf.withColumnRenamed("nodeId", "id"),
+        on="id",
+        how="left"
+    ).withColumn(
+        "c_coms",
+        F.when(
+            F.col("community_id").isNotNull(),  # If there is a community_id to add
+            F.concat(F.col("c_coms"), F.array(F.col("community_id")))  # Append to c_coms array
+        ).otherwise(F.col("c_coms"))  # Keep the original c_coms if no community_id
+    ).drop("community_id", "tag")  # Drop extra columns from join if not needed
 
-    if not self.communitiesDf:
-        self.communitiesDf = updated_communitiesDf
-    else:
-        self.communitiesDf.unionByName(updated_communitiesDf)
+    # Step 3: Deduplicate and remove redundant entries
+    updated_vertices = (
+        updated_vertices
+        .withColumn("c_coms", F.array_distinct(F.col("c_coms")))  # Remove duplicates within c_coms
+        .dropDuplicates(["id"])  # Ensure no duplicate rows for the same id
+    )
 
-    printTrace("communitiesDf:", self.communitiesDf)
-
+    # Update the graph
+    self.g = GraphFrame(updated_vertices, self.g.edges)
 
 def detect_common_neighbors(self, edge_updates):
     """
     Detect common neighbors for edges in the batch using GraphFrames.
     """
+
+    # TODO Check performance of these, seems slow
     # Extract neighbors for each node in the graph
     neighbors = self.g.find("(a)-[]->(b)") \
         .select(F.col("a.id").alias("node"), F.col("b.id").alias("neighbor")) \
