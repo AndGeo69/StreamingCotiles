@@ -247,11 +247,21 @@ def common_neighbors_analysis(self, new_edges:DataFrame, common_neighbors:DataFr
 
     #  NEW IMPL. VVVV
 
-    shared_coms = (new_edges.alias("new_edges")
+    common_neighbors = common_neighbors.filter(F.col("common_neighbors").isNotNull()).withColumn(
+        "common_neighbor", F.explode(F.col("common_neighbors")))
+
+    shared_coms = (common_neighbors.alias("common_neighbors")
                    .join(self.g.vertices.alias("vertices_u"),
-                         on=F.col("new_edges.src") == F.col("vertices_u.id"), how="left")
+                         on=F.col("common_neighbors.src") == F.col("vertices_u.id"), how="left")
                    .join(self.g.vertices.alias("vertices_v"),
-                         on=F.col("new_edges.dst") == F.col("vertices_v.id"), how="left"))
+                         on=F.col("common_neighbors.dst") == F.col("vertices_v.id"), how="left"))
+
+    # Might not need new_edges at all since i have the information in common_neighbors !!! <------
+    # shared_coms = (new_edges.alias("new_edges")
+    #                .join(self.g.vertices.alias("vertices_u"),
+    #                      on=F.col("new_edges.src") == F.col("vertices_u.id"), how="left")
+    #                .join(self.g.vertices.alias("vertices_v"),
+    #                      on=F.col("new_edges.dst") == F.col("vertices_v.id"), how="left"))
 
     # Step 1: Extract the communities for each node
     # We need to explicitly select the 'c_coms' from both vertices_u and vertices_v
@@ -268,48 +278,63 @@ def common_neighbors_analysis(self, new_edges:DataFrame, common_neighbors:DataFr
     shared_coms = shared_coms.withColumn("only_v", F.array_except("dst_coms", "src_coms"))
 
     shared_coms = (shared_coms.withColumnRenamed("src", "shared_coms_src")
-                   .withColumnRenamed("dst", "shared_coms_dst"))
+                   .withColumnRenamed("dst", "shared_coms_dst")
+                   .withColumnRenamed("tags", "shared_coms_tags")
+                   .select(
+                        F.col("shared_coms_src").alias("shared_coms_src"),
+                        F.col("shared_coms_dst").alias("shared_coms_dst"),
+                        F.col("timestamp").alias("timestamp"),
+                        F.col("shared_coms_tags").alias("shared_coms_tags"),
+                        F.col("weight").alias("weight"),
+                        F.col("src_neighbors").alias("src_neighbors"),
+                        F.col("dst_neighbors").alias("dst_neighbors"),
+                        F.col("common_neighbors").alias("common_neighbors"),
+                        F.col("src_coms").alias("src_coms"),
+                        F.col("dst_coms").alias("dst_coms"),
+                        F.col("shared_coms").alias("shared_coms"),
+                        F.col("only_u").alias("only_u"),
+                        F.col("only_v").alias("only_v"),
+                   ))
 
-    # Exploding common_neighbors into separate rows for processing
-    common_neighbors_exploded = common_neighbors.filter(F.col("common_neighbors").isNotNull()).withColumn(
-        "common_neighbor", F.explode(F.col("common_neighbors")))
+    printTrace("shared_coms", shared_coms)
 
     # # Join common neighbors with src_coms and dst_coms
-    shared_coms_with_neighbors = shared_coms.join(
-        common_neighbors_exploded,
-        F.expr("""
-            (shared_coms_src = common_neighbor) OR
-            (shared_coms_dst = common_neighbor)
-        """),
-        how="inner"
-    )
+    # shared_coms_with_neighbors = shared_coms.join(
+    #     common_neighbors_exploded,
+    #     (F.col("shared_coms_src") == F.col("common_neighbor")) |
+    #     (F.col("shared_coms_dst") == F.col("common_neighbor")),
+    #     how="inner"
+    # ).filter(
+    #     (F.col("shared_coms_src") == F.col("common_neighbor")) | (F.col("shared_coms_dst") == F.col("common_neighbor"))
+    # )
 
     # Propagate 'src' logic: Propagate src if 'common_neighbor' is in 'only_v'
-    propagated_src = shared_coms_with_neighbors.withColumn(
+    propagated_src = shared_coms.withColumn(
         "propagated_src",
-        F.when(F.array_contains(F.col("only_v"), F.col("common_neighbor")), True).otherwise(False)
-    ).select(
-        F.col("shared_coms_src").alias("node_id"),
-        F.col("common_neighbor").alias("community_id"),
-        F.col("propagated_src").alias("propagated_src")
+        F.when(F.array_contains(F.col("only_v"), F.col("common_neighbors")), True).otherwise(False)
     )
+    #  TODO check common_neighbors list might need an exploded one
 
     # Propagate 'dst' logic: Propagate dst if 'common_neighbor' is in 'only_u'
-    propagated_dst = shared_coms_with_neighbors.withColumn(
+    propagated_dst = shared_coms.withColumn(
         "propagated_dst",
-        F.when(F.array_contains(F.col("only_u"), F.col("common_neighbor")), True).otherwise(False)
-    ).select(
-        F.col("shared_coms_dst").alias("node_id"),
-        F.col("common_neighbor").alias("community_id")
+        F.when(F.array_contains(F.col("only_u"), F.col("common_neighbors")), True).otherwise(False)
     )
+
+    printTrace("propagated_src", propagated_src)
+    printTrace("propagated_dst", propagated_dst)
 
     # Combine the propagated community updates
     propagated = propagated_src.union(propagated_dst).distinct()
 
+    printTrace("propagated", propagated)
+
+    new_communities = propagated.withColumn("community_id", F.monotonically_increasing_id())
+
     # Step 4: Handle new communities if no propagation occurs TODO this
-    new_communities = common_neighbors_exploded.join(
-        shared_coms, on=["src", "dst"], how="left_anti"
-    ).withColumn("community_id", F.monotonically_increasing_id())
+    # new_communities = common_neighbors_exploded.join(
+    #     shared_coms, on=["src", "dst"], how="left_anti"
+    # ).withColumn("community_id", F.monotonically_increasing_id())
 
     new_communities_updates = new_communities.select(
         F.col("src").alias("node_id"), "community_id"
