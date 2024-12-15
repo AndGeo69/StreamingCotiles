@@ -30,9 +30,7 @@ class TILES:
         self.cid = 0
         self.actual_slice = 0
         self.g: GraphFrame = None
-        self.community_memberships: DataFrame = None
         self.communityTagsDf: DataFrame = None
-        self.communitiesDf: DataFrame = None
         self.spark = spark
         self.base = os.getcwd()
         self.status = open(f"{self.base}/{path}/extraction_status.txt", "w")
@@ -61,7 +59,7 @@ class TILES:
         self.status.flush()
 
         # Priority queue for TTL handling
-        qr = PriorityQueue()
+        # qr = PriorityQueue()
 
         if batch_df.isEmpty():
             return
@@ -149,149 +147,170 @@ class TILES:
                 self.g = GraphFrame(updated_vertices, self.g.edges)
 
             print("new data (edges)")
-            new_edges.show(truncate= False)
+            # new_edges.show(truncate= False)
             print("new data (nodes)")
-            new_nodes.show(truncate= False)
+            # new_nodes.show(truncate= False)
 
         print("before theDataframe")
         print("graph edges:")
-        self.g.edges.show(truncate=False)
+        # self.g.edges.show(truncate=False)
         print("graph vertices:")
-        self.g.vertices.show(truncate=False)
+        # self.g.vertices.show(truncate=False)
 
         # Add or update the edges in the GraphFrame
         if self.g:
             self.g = update_graph_with_edges(self.g, new_edges)
 
         # common_neighbors = evolution(self.g, new_edges)
+        print(time.ctime() + " Before detect_common_neighbors")
         common_neighbors = detect_common_neighbors(self, new_edges)
-        printTrace("Common Neighbors:", common_neighbors)
+        print(time.ctime() + " After detect_common_neighbors")
+        # printTrace("Common Neighbors:", common_neighbors)
 
-        common_neighbors_analysis(self, new_edges, common_neighbors)
+        common_neighbors_analysis(self, common_neighbors)
 
 
         # Show the updated edges (debugging)
         print("graph edges:")
-        self.g.edges.show(truncate=False)
+        # self.g.edges.show(truncate=False)
         print("graph nodes:")
-        self.g.vertices.show(truncate=False)
+        # self.g.vertices.show(truncate=False)
 
 
-
-
-def common_neighbors_analysi(self, new_edges: DataFrame, common_neighbors: DataFrame):
+def common_neighbors_analysis(self, common_neighbors: DataFrame):
     """
     Analyze and update communities for nodes with common neighbors in a streaming manner.
 
-    :param new_edges: DataFrame with columns ["src", "dst"]
-    :param common_neighbors: DataFrame with columns ["src", "dst", "common_neighbor"]
+    :param common_neighbors: DataFrame with columns ["src", "dst", "common_neighbors"]
     """
-
-    # Ensure common_neighbors is not empty
     if common_neighbors.isEmpty():
         return
 
-    # Step 1: Extract communities for src and dst
-    src_communities = new_edges.alias("edges") \
-        .join(self.communitiesDf.alias("coms_u"), F.array_contains(F.col("coms_u.nodes"), F.col("edges.src")), "left") \
-        .select(F.col("edges.src"), F.col("coms_u.cid").alias("src_cid"))
+    # Step 1: Filter out null common_neighbors and explode to one row per common_neighbor
+    common_neighbors = (
+        common_neighbors
+        .filter(F.col("common_neighbors").isNotNull())
+        .withColumn("common_neighbor", F.explode(F.col("common_neighbors")))
+    )
 
-    dst_communities = new_edges.alias("edges") \
-        .join(self.communitiesDf.alias("coms_v"), F.array_contains(F.col("coms_v.nodes"), F.col("edges.dst")), "left") \
-        .select(F.col("edges.dst"), F.col("coms_v.cid").alias("dst_cid"))
+    # Step 2: Reshape common_neighbors for a single join (avoiding double join)
+    common_neighbors_reshaped = (
+        common_neighbors
+        .select(
+            F.col("src").alias("node_id"),
+            F.col("dst").alias("other_node_id"),
+            F.col("timestamp"),
+            F.col("tags"),
+            F.col("weight"),
+            F.col("common_neighbors")
+        )
+        .union(
+            common_neighbors
+            .select(
+                F.col("dst").alias("node_id"),
+                F.col("src").alias("other_node_id"),
+                F.col("timestamp"),
+                F.col("tags"),
+                F.col("weight"),
+                F.col("common_neighbors")
+            )
+        )
+    )
 
-    # Step 2: Derive shared and exclusive communities
-    shared_coms = src_communities.join(dst_communities, (src_communities["src"] == dst_communities["dst"]), "inner") \
-        .select("src_cid", "dst_cid").distinct()
+    # Rename node_id and other_node_id back to src and dst for later use
+    common_neighbors_reshaped = (
+        common_neighbors_reshaped
+        .withColumnRenamed("node_id", "src")
+        .withColumnRenamed("other_node_id", "dst")
+    )
 
-    only_u = src_communities.subtract(shared_coms)
-    only_v = dst_communities.subtract(shared_coms)
+    # Step 3: Join with vertices DataFrame once (avoiding double join)
+    vertices = self.g.vertices.select("id", "c_coms")
+    # Perform the join once and get community information for both src and dst
+    shared_coms = (
+        common_neighbors_reshaped
+        .join(vertices, (F.col("src") == F.col("id")) | (F.col("dst") == F.col("id")), how="left")
+        .select(
+            F.col("src"),
+            F.col("dst"),
+            F.col("timestamp"),
+            F.col("tags"),
+            F.col("weight"),
+            F.col("common_neighbors"),
+            F.when(F.col("src") == F.col("id"), F.col("c_coms")).alias("src_coms"),
+            F.when(F.col("dst") == F.col("id"), F.col("c_coms")).alias("dst_coms")
+        )
+    )
 
-    # Step 3: Analyze communities for common neighbors
-    common_neighbor_coms = common_neighbors.alias("cn") \
-        .join(self.communitiesDf.alias("cn_coms"), F.array_contains(F.col("cn_coms.nodes"), F.col("cn.common_neighbor")), "left") \
-        .select("cn.src", "cn.dst", "cn.common_neighbor", "cn_coms.cid").distinct()
+    # Optional: Cache the resulting DataFrame if it's reused later in streaming processing
+    shared_coms.cache()
 
-    # Step 4: Propagate communities
-    def propagate_community(row):
-        src = row["src"]
-        dst = row["dst"]
-        common_neighbor = row["common_neighbor"]
-        community_id = row["cid"]
+    print(time.ctime() + "common_neighbors_analysis: AFTER single join with vertices")
 
-        if community_id in only_v:
-            self.addToCommunity(src, community_id, tags=None)
-        if community_id in only_u:
-            self.addToCommunity(dst, community_id, tags=None)
-        if community_id in shared_coms and community_id not in self.communitiesDf:
-            self.addToCommunity(common_neighbor, community_id, tags=None)
+    # # Step 1: Filter out null common_neighbors and explode to one row per common_neighbor
+    # common_neighbors = (
+    #     common_neighbors
+    #     .filter(F.col("common_neighbors").isNotNull())
+    #     .withColumn("common_neighbor", F.explode(F.col("common_neighbors")))
+    # )
+    #
+    # print(time.ctime() + "common_neighbors_analysis: BEFORE common_neighbors double join w/ vertices")
+    # # Step 2: Join with `self.g.vertices` to get community information for src and dst
+    # vertices = self.g.vertices.select("id", "c_coms")
+    # shared_coms = (
+    #     common_neighbors
+    #     .join(vertices.alias("vertices_u"), F.col("src") == F.col("vertices_u.id"), how="left")
+    #     .join(vertices.alias("vertices_v"), F.col("dst") == F.col("vertices_v.id"), how="left")
+    #     .select(
+    #         F.col("src"),
+    #         F.col("dst"),
+    #         F.col("timestamp"),
+    #         F.col("tags"),
+    #         F.col("weight"),
+    #         F.col("common_neighbors"),
+    #         F.col("vertices_u.c_coms").alias("src_coms"),
+    #         F.col("vertices_v.c_coms").alias("dst_coms")
+    #     )
+    # )
+    print(time.ctime() + "common_neighbors_analysis: AFTER common_neighbors double join w/ vertices")
 
-    common_neighbor_coms.foreach(propagate_community)
 
-    # Step 5: Handle propagation failures
-    new_coms = common_neighbors.filter("cid IS NULL").distinct()
-    new_coms.foreach(lambda row: self.addToCommunity(row["src"], self.new_community_id, tags=None))
-    new_coms.foreach(lambda row: self.addToCommunity(row["dst"], self.new_community_id, tags=None))
-    new_coms.foreach(lambda row: self.addToCommunity(row["common_neighbor"], self.new_community_id, tags=None))
+    print(time.ctime() + "common_neighbors_analysis: BEFORE intersecting")
+    # Step 3: Compute derived columns - shared_coms, only_u, and only_v
+    shared_coms = (
+        shared_coms
+        .withColumn("shared_coms", F.array_intersect(F.col("src_coms"), F.col("dst_coms")))
+        .withColumn("only_u", F.array_except(F.col("src_coms"), F.col("dst_coms")))
+        .withColumn("only_v", F.array_except(F.col("dst_coms"), F.col("src_coms")))
+    )
+    print(time.ctime() + "common_neighbors_analysis: AFTER intersecting")
+
+    # Step 4: Rename and reselect columns in the final DataFrame
+    print(time.ctime() + "common_neighbors_analysis: BEFORE shared_coms selecting")
+    shared_coms = (
+        shared_coms
+        .select(
+            F.col("src").alias("shared_coms_src"),
+            F.col("dst").alias("shared_coms_dst"),
+            F.col("timestamp"),
+            F.col("tags").alias("shared_coms_tags"),
+            F.col("weight"),
+            F.col("common_neighbors"),
+            F.col("src_coms"),
+            F.col("dst_coms"),
+            F.col("shared_coms"),
+            F.col("only_u"),
+            F.col("only_v")
+        )
+    )
+    print(time.ctime() + "common_neighbors_analysis: AFTER shared_coms selecting")
 
 
-def common_neighbors_analysis(self, new_edges:DataFrame, common_neighbors:DataFrame):
-    """
-    Analyze and update communities for nodes with common neighbors in a streaming manner.
-
-    :param common_neighbors: DataFrame with columns ["src", "dst", "common_neighbor"]
-    """
-
-    if common_neighbors.isEmpty() or common_neighbors.count() < 1:
-        return
-
-    #  NEW IMPL. VVVV
-
-    common_neighbors = common_neighbors.filter(F.col("common_neighbors").isNotNull()).withColumn(
-        "common_neighbor", F.explode(F.col("common_neighbors")))
-
-    shared_coms = (common_neighbors.alias("common_neighbors")
-                   .join(self.g.vertices.alias("vertices_u"),
-                         on=F.col("common_neighbors.src") == F.col("vertices_u.id"), how="left")
-                   .join(self.g.vertices.alias("vertices_v"),
-                         on=F.col("common_neighbors.dst") == F.col("vertices_v.id"), how="left"))
-
-    # Step 1: Extract the communities for each node
-    # We need to explicitly select the 'c_coms' from both vertices_u and vertices_v
-    shared_coms = shared_coms.withColumn("src_coms", F.col("vertices_u.c_coms"))
-    shared_coms = shared_coms.withColumn("dst_coms", F.col("vertices_v.c_coms"))
-
-    # Step 2: Calculate "shared_coms" - communities that are shared between `src` and `dst`
-    shared_coms = shared_coms.withColumn("shared_coms", F.array_intersect("src_coms", "dst_coms"))
-    # Step 3: Calculate "only_u" - communities that are unique to `u`
-    shared_coms = shared_coms.withColumn("only_u", F.array_except("src_coms", "dst_coms"))
-
-    # Step 4: Calculate "only_v" - communities that are unique to `v`
-    # |src|dst| timestamp| tags|weight| id|c_coms| id|c_coms|src_coms|dst_coms|shared_coms|only_u|only_v|
-    shared_coms = shared_coms.withColumn("only_v", F.array_except("dst_coms", "src_coms"))
-
-    shared_coms = (shared_coms.withColumnRenamed("src", "shared_coms_src")
-                   .withColumnRenamed("dst", "shared_coms_dst")
-                   .withColumnRenamed("tags", "shared_coms_tags")
-                   .select(
-                        F.col("shared_coms_src").alias("shared_coms_src"),
-                        F.col("shared_coms_dst").alias("shared_coms_dst"),
-                        F.col("timestamp").alias("timestamp"),
-                        F.col("shared_coms_tags").alias("shared_coms_tags"),
-                        F.col("weight").alias("weight"),
-                        F.col("src_neighbors").alias("src_neighbors"),
-                        F.col("dst_neighbors").alias("dst_neighbors"),
-                        F.col("common_neighbors").alias("common_neighbors"),
-                        F.col("src_coms").alias("src_coms"),
-                        F.col("dst_coms").alias("dst_coms"),
-                        F.col("shared_coms").alias("shared_coms"),
-                        F.col("only_u").alias("only_u"),
-                        F.col("only_v").alias("only_v"),
-                   ))
-
-    printTrace("shared_coms", shared_coms)
+    print("shared_coms")
+    # printTrace("shared_coms", shared_coms)
 
     # Propagate 'src' logic: Propagate src if 'common_neighbor' is in 'only_v'
+    print(time.ctime() + "common_neighbors_analysis: BEFORE shared_coms propagated expression ")
     propagated = shared_coms.withColumn(
         "propagated",
         F.when(
@@ -301,15 +320,20 @@ def common_neighbors_analysis(self, new_edges:DataFrame, common_neighbors:DataFr
             True
         ).otherwise(False)
     )
+    print(time.ctime() + "common_neighbors_analysis: AFTER shared_coms propagated expression ")
+
     #  TODO check common_neighbors list might need an exploded one
 
-    printTrace("propagated", propagated)
+    print("propagated")
+    # printTrace("propagated", propagated)
 
-    new_communities = propagated.withColumn("community_id", F.monotonically_increasing_id())
+    propagated = propagated.withColumn("community_id", F.monotonically_increasing_id())
 
-    printTrace("new_communities", new_communities)
+    # printTrace("new_communities(propagated)", propagated)
 
-    nodesToBeAddedToCom = (new_communities.filter("propagated = false")
+    print(time.ctime() + "common_neighbors_analysis: BEFORE shared_coms nodesToBeAddedToCom = expression ")
+
+    nodesToBeAddedToCom = (propagated.filter("propagated = false")
                                .select(
                                     F.col("shared_coms_src"),
                                     F.col("shared_coms_dst"),
@@ -318,7 +342,7 @@ def common_neighbors_analysis(self, new_edges:DataFrame, common_neighbors:DataFr
                                     F.col("community_id"),
                             )
                            )
-    prexistingCommunities = (new_communities.filter("propagated = true")
+    prexistingCommunities = (propagated.filter("propagated = true")
                                 .select(
                                     F.col("shared_coms_src"),
                                     F.col("shared_coms_dst"),
@@ -328,10 +352,15 @@ def common_neighbors_analysis(self, new_edges:DataFrame, common_neighbors:DataFr
                                 )
                             )
 
-    printTrace("node propagted FASLE", nodesToBeAddedToCom)
-    printTrace("node propagted TRUE", prexistingCommunities)
+    # printTrace("node propagted FASLE", nodesToBeAddedToCom)
+    # printTrace("node propagted TRUE", prexistingCommunities)
 
+    print(time.ctime() + " BEFORE add to community")
     add_to_community(self, nodesToBeAddedToCom)
+    print(time.ctime() + " AFTER add to community")
+
+    # if prexistingCommunities is not None:
+    #     printTrace("prexistingCommunities", prexistingCommunities)
 
     # Step 4: Handle new communities if no propagation occurs TODO this
     # new_communities = common_neighbors_exploded.join(
@@ -382,12 +411,15 @@ def add_to_community(self, toBeAddedDf: DataFrame):
         ).otherwise(F.col("c_coms"))  # Keep the original c_coms if no community_id
     ).drop("community_id", "tag")  # Drop extra columns from join if not needed
 
-    # Step 3: Deduplicate and remove redundant entries
-    updated_vertices = (
-        updated_vertices
-        .withColumn("c_coms", F.array_distinct(F.col("c_coms")))  # Remove duplicates within c_coms
-        .dropDuplicates(["id"])  # Ensure no duplicate rows for the same id
+    updated_vertices = updated_vertices.withColumn(
+        "c_coms", F.array_distinct(F.col("c_coms"))
     )
+    # Step 3: Deduplicate and remove redundant entries
+    # updated_vertices = (
+    #     updated_vertices
+    #     .withColumn("c_coms", F.array_distinct(F.col("c_coms")))  # Remove duplicates within c_coms
+    #     .dropDuplicates(["id"])  # Ensure no duplicate rows for the same id
+    # )
 
     # Update the graph
     self.g = GraphFrame(updated_vertices, self.g.edges)
@@ -397,31 +429,72 @@ def detect_common_neighbors(self, edge_updates):
     Detect common neighbors for edges in the batch using GraphFrames.
     """
 
-    # TODO Check performance of these, seems slow
-    # Extract neighbors for each node in the graph
-    neighbors = self.g.find("(a)-[]->(b)") \
-        .select(F.col("a.id").alias("node"), F.col("b.id").alias("neighbor")) \
-        .groupBy("node") \
+    # Step 1: Extract neighbors for each node in the graph using a simpler approach
+    edges = self.g.edges
+    neighbors = (
+        edges.select(F.col("src").alias("node"), F.col("dst").alias("neighbor"))
+        .union(edges.select(F.col("dst").alias("node"), F.col("src").alias("neighbor")))
+        .groupBy("node")
         .agg(F.collect_list("neighbor").alias("neighbors"))
+    )
 
-    # Join edge_updates with neighbors twice (for src and dst nodes)
-    edge_neighbors = edge_updates \
-        .join(neighbors.withColumnRenamed("node", "src"), on="src", how="left") \
-        .withColumnRenamed("neighbors", "src_neighbors") \
-        .join(neighbors.withColumnRenamed("node", "dst"), on="dst", how="left") \
+    # Step 2: Join edge_updates with neighbors for both src and dst nodes
+    edge_neighbors = (
+        edge_updates
+        .join(neighbors.withColumnRenamed("node", "src"), on="src", how="left")
+        .withColumnRenamed("neighbors", "src_neighbors")
+        .join(neighbors.withColumnRenamed("node", "dst"), on="dst", how="left")
         .withColumnRenamed("neighbors", "dst_neighbors")
+    )
 
-    # Compute common neighbors
-    common_neighbors_df = edge_neighbors.withColumn(
+    # Step 3: Compute common neighbors
+    edge_neighbors = edge_neighbors.withColumn(
         "common_neighbors", F.array_intersect(F.col("src_neighbors"), F.col("dst_neighbors"))
     )
 
-    # Filter edges with common neighbors
-    common_neighbors_filtered = common_neighbors_df.filter(
+    # Step 4: Filter edges with common neighbors
+    common_neighbors_filtered = edge_neighbors.filter(
         F.col("common_neighbors").isNotNull() & (F.size(F.col("common_neighbors")) > 0)
     )
+    common_neighbors_filtered.select(F.col("dst"), F.col("src"),
+                                     F.col("timestamp"), F.col("tags"),
+                                     F.col("weight"), F.col("common_neighbors"))
 
-    return common_neighbors_filtered
+    return common_neighbors_filtered.select(F.col("dst"), F.col("src"),
+                                     F.col("timestamp"), F.col("tags"),
+                                     F.col("weight"), F.col("common_neighbors"))
+
+
+# def detect_common_neighbors(self, edge_updates):
+#     """
+#     Detect common neighbors for edges in the batch using GraphFrames.
+#     """
+#
+#     # TODO Check performance of these, seems slow
+#     # Extract neighbors for each node in the graph
+#     neighbors = self.g.find("(a)-[]->(b)") \
+#         .select(F.col("a.id").alias("node"), F.col("b.id").alias("neighbor")) \
+#         .groupBy("node") \
+#         .agg(F.collect_list("neighbor").alias("neighbors"))
+#
+#     # Join edge_updates with neighbors twice (for src and dst nodes)
+#     edge_neighbors = edge_updates \
+#         .join(neighbors.withColumnRenamed("node", "src"), on="src", how="left") \
+#         .withColumnRenamed("neighbors", "src_neighbors") \
+#         .join(neighbors.withColumnRenamed("node", "dst"), on="dst", how="left") \
+#         .withColumnRenamed("neighbors", "dst_neighbors")
+#
+#     # Compute common neighbors
+#     common_neighbors_df = edge_neighbors.withColumn(
+#         "common_neighbors", F.array_intersect(F.col("src_neighbors"), F.col("dst_neighbors"))
+#     )
+#
+#     # Filter edges with common neighbors
+#     common_neighbors_filtered = common_neighbors_df.filter(
+#         F.col("common_neighbors").isNotNull() & (F.size(F.col("common_neighbors")) > 0)
+#     )
+#
+#     return common_neighbors_filtered
 
 def evolution(graph: GraphFrame, edge_updates: DataFrame):
     """

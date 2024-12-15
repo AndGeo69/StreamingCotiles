@@ -18,7 +18,7 @@ def create_streaming_session():
             # Initialize SparkSession
             spark = (SparkSession.builder.appName("StreamingCOTILES")
                      .config("spark.jars.packages","graphframes:graphframes:0.8.3-spark3.4-s_2.12").getOrCreate())
-            spark.conf.set("spark.sql.shuffle.partitions", "2") # testing smalling partitions over the default 200
+            spark.conf.set("spark.sql.shuffle.partitions", "8") # testing smalling partitions over the default 200
 
             # Structured Streaming API
             streamingDataFrame = spark.readStream.format('socket').option('host', 'localhost').option('port', '9999').load()
