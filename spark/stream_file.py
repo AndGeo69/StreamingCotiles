@@ -4,7 +4,7 @@ from math import trunc
 
 
 # Acts as a server, streaming the txt file content to an open socket
-def send_file_over_socket(file_path, host='localhost', port=9999, delay=4):
+def send_file_over_socket(file_path, host='localhost', port=9999, delay=0.5):
     # Create a socket object
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((host, port))
@@ -24,27 +24,27 @@ def send_file_over_socket(file_path, host='localhost', port=9999, delay=4):
             print(f"Connection from {client_address} established.")
 
             try:
-                with client_socket:  # Use a context manager to handle the client socket
-                    while True:
-                        with open(file_path, 'r') as file:
-                            for line in file:
-                                # Strip newline characters
-                                data = line.strip()
+                # with client_socket:  # Use a context manager to handle the client socket
+                while True:
+                    with open(file_path, 'r') as file:
+                        for line in file:
+                            # Strip newline characters
+                            data = line.strip()
 
-                                if data:  # Send only non-empty lines
-                                    message = data + '\n'
-                                    try:
-                                        print(f"Sending: {message}")
-                                        client_socket.sendall(message.encode('utf-8'))
-                                        # Add a delay to simulate streaming data
-                                        time.sleep(delay)
-                                    except BrokenPipeError:
-                                        print(f"Client disconnected while sending data.")
-                                        break  # Exit the inner loop to handle client disconnection
+                            if data:  # Send only non-empty lines
+                                message = data + '\n'
+                                try:
+                                    print(f"Sending: {message}")
+                                    client_socket.sendall(message.encode('utf-8'))
+                                    # Add a delay to simulate streaming data
+                                    time.sleep(delay)
+                                except BrokenPipeError:
+                                    print(f"Client disconnected while sending data.")
+                                    break  # Exit the inner loop to handle client disconnection
 
-                        # When the file has been fully read, print the message and start over
-                        print("End of file reached. Restarting from the beginning...")
-                        file.seek(0)  # Reset the file pointer to the beginning
+                    # When the file has been fully read, print the message and start over
+                    print("End of file reached. Restarting from the beginning...")
+                    file.seek(0)  # Reset the file pointer to the beginning
 
             except (ConnectionResetError, ConnectionAbortedError):
                 print(f"Client disconnected. Waiting for a new client...")

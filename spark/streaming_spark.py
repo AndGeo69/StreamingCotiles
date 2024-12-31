@@ -3,8 +3,9 @@ import subprocess
 import sys
 import time
 
+from pyspark.sql import functions as F
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import explode, split
+from pyspark.sql.functions import explode, split, col, from_csv
 from pyspark.sql.types import StructType, StructField, StringType
 
 from spark.applied.TILES import TILES
@@ -16,20 +17,23 @@ def create_streaming_session():
     while True:
         try:
             # Initialize SparkSession
-            spark = SparkSession.builder.appName("StreamingCOTILES").getOrCreate()
-            spark.conf.set("spark.sql.shuffle.partitions", "2") # testing smalling partitions over the default 200
+            spark = (SparkSession.builder.appName("StreamingCOTILES")
+                     .config("spark.jars.packages","graphframes:graphframes:0.8.3-spark3.4-s_2.12")
+            .config("spark.sql.shuffle.partitions", "2")
+            .config("spark.executor.memory", "4g")
+            .config("spark.driver.memory", "4g")
+                     .getOrCreate())
+            spark.conf.set("spark.streaming.backpressure.enabled", "true")
 
-            # Structured Streaming API
+            # Enabled by properties file located in /home/bigdata/spark/conf    spark-defaults.cond
             streamingDataFrame = spark.readStream.format('socket').option('host', 'localhost').option('port', '9999').load()
-
-            streamingDF = streamingDataFrame.selectExpr(
-                "split(value, '\t')[0] as action",
-                "split(value, '\t')[1] as nodeU",
-                "split(value, '\t')[2] as nodeV",
-                "split(value, '\t')[3] as timestamp",
-                "split(value, '\t')[4] as tags"
-            )
-
+            streamingDF = (streamingDataFrame.selectExpr(
+                "split(value, '\\t')[0] as action",
+                "cast(split(value, '\\t')[1] as int) as nodeU",
+                "cast(split(value, '\\t')[2] as int) as nodeV",
+                "cast(split(value, '\\t')[3] as int) as timestamp",
+                "split(split(value, '\\t')[4], ',') as tags"
+            ))
             # Example of a line tab-delimited
             # "+    29	45503	1280970074	linux,arch-linux,dns,cache"
             # 1st: action, "+" add or "-" remove edge
@@ -39,29 +43,23 @@ def create_streaming_session():
             # 5th: tags (comma-separated)
             # The tags are applied on both edges
 
-            tiles_instance = TILES(stream=streamingDF)
-
+            tiles_instance = TILES(spark=spark)
             streamingDF.printSchema()
 
             print("streamingDF IsStreaming: " + streamingDF.isStreaming.__str__())
 
+            # In the writeStream:
             (streamingDF.writeStream.foreachBatch(tiles_instance.execute)
-                                         .outputMode("append")
-                                         .start()
-                                         .awaitTermination())
-
-
-            # query = streamingDF.writeStream.outputMode("append").format("console").trigger(processingTime='5 second').start()
-
-
-            # Await termination
-            # query.awaitTermination()
+                        .outputMode("append")
+                        .trigger(processingTime="5 seconds")
+                        .start()
+                        .awaitTermination())
             break
 
         except Exception as e:
             print(f"Failed to connect to socket: {e}")
             print("Retrying in 5 seconds...")
-            time.sleep(5)
+            time.sleep(1)
 
 
     def run_tiles_algorithm(mode, obs, ttl, path, filename):
@@ -106,7 +104,16 @@ def create_streaming_session():
 if __name__ == "__main__":
     create_streaming_session()
 
-
+# streamingDF = (streamingDataFrame
+# .withColumn("fields", F.split(F.col("value"), "\\t"))
+# .select(
+#     F.col("fields")[0].alias("action"),
+#     F.col("fields")[1].cast("int").alias("nodeU"),
+#     F.col("fields")[2].cast("int").alias("nodeV"),
+#     F.col("fields")[3].cast("int").alias("timestamp"),
+#     F.split(F.col("fields")[4], ",").alias("tags")
+# )
+# )
 # Split and process words
 # words = streamingDataFrame.select(explode(split(streamingDataFrame.value, '\t')).alias('word'))
 
@@ -123,3 +130,40 @@ if __name__ == "__main__":
 #     StructField("timestamp", StringType(), True),
 #     StructField("tags", StringType(), True)
 # ]) # User defined schema not supported by TextSocketProvider - Keeping this to apply on kafka stream
+
+
+ # schema = "action STRING, nodeU INT, nodeV INT, timestamp INT, tags STRING"
+            # streamingDF = (streamingDataFrame
+            #                .select(from_csv(col("value"), schema, {"delimiter": "\t"}).alias("data"))
+            #                .select("data.*")
+            #                .withColumn("tags", split(col("tags"), ",")))
+
+            # Efficient Column Splitting and Transformation
+            # split_col = split(col("value"), "\t")
+            # tags_split = split(split_col.getItem(4), ",")
+
+            # streamingDF = (streamingDataFrame
+            #                .withColumn("action", split_col.getItem(0))
+            #                .withColumn("nodeU", col("value").substr(0, 10).cast("int"))  # Extract and cast nodeU
+            #                .withColumn("nodeV", col("value").substr(11, 20).cast("int"))  # Extract and cast nodeV
+            #                .withColumn("timestamp",
+            #                            col("value").substr(21, 31).cast("int"))  # Extract and cast timestamp
+            #                .withColumn("tags", tags_split)  # Split the tags into an array
+            #                )
+
+# query = streamingDF.writeStream.outputMode("append").format("console").trigger(processingTime='5 second').start()
+
+
+# Await termination
+# query.awaitTermination()
+
+
+# streamingDF = (streamingDataFrame.selectExpr(
+#     "split(value, '\t')[0] as action",
+#     "split(value, '\t')[1] as nodeU",
+#     "split(value, '\t')[2] as nodeV",
+#     "split(value, '\t')[3] as timestamp",
+#     "split(value, '\t')[4] as tags"
+# ).withColumn("nodeU", col("nodeU").cast("int"))
+# .withColumn("nodeV", col("nodeV").cast("int"))
+# .withColumn("timestamp", col("timestamp").cast("int")))
