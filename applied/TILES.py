@@ -1,5 +1,6 @@
 import datetime
 import os
+import shutil
 import string
 import sys
 import time
@@ -26,6 +27,27 @@ __website__ = "about.giuliorossetti.net"
 __license__ = "BSD"
 
 from pyspark.sql import DataFrame
+
+
+def clear_directory(directory_path: str):
+    """
+    Clears all the contents of the specified directory.
+    If the directory does not exist, it creates it.
+    """
+    if os.path.exists(directory_path):
+        # Remove all contents of the directory
+        for filename in os.listdir(directory_path):
+            file_path = os.path.join(directory_path, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)  # Remove file or symbolic link
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)  # Remove directory
+            except Exception as e:
+                print(f"Failed to delete {file_path}. Reason: {e}")
+    else:
+        # Create the directory if it doesn't exist
+        os.makedirs(directory_path)
 
 
 class TILES:
@@ -70,6 +92,8 @@ class TILES:
             StructField("tags", ArrayType(StringType()), True),
             StructField("weight", IntegerType(), True)
         ])
+        clear_directory(self.vertices_path)
+        clear_directory(self.edges_path)
 
     def execute(self, batch_df: DataFrame, batch_id):
         """
@@ -146,30 +170,22 @@ class TILES:
                                              F.lit(1).alias("weight"))
 
         # Load previous state
-        try:
-            vertices_state = self.spark.read.format("parquet").load(self.vertices_path)
-        except Exception:
-            vertices_state = self.spark.createDataFrame([], self.vertices_schema)
+        vertices_state, edges_state = loadState(self)
 
-        try:
-            edges_state = self.spark.read.format("parquet").load(self.edges_path)
-        except Exception:
-            edges_state = self.spark.createDataFrame([], self.edges_schema)
+        updated_edges = update_graph_with_edges(edges_state, new_edges).dropDuplicates(subset=["src", "dst", "timestamp"])
 
-        new_nodes_filtered = new_nodes.join(vertices_state.select("id"), on="id", how="left_anti").dropDuplicates()
-        new_edges_filtered = new_edges.join(edges_state.select("src", "dst"), on=["src", "dst"], how="left_anti").dropDuplicates()
+        new_nodes_filtered = new_nodes.join(vertices_state.select("id"), on="id", how="left_anti")
+        # new_edges_filtered = updated_edges.join(edges_state.select("src", "dst"), on=["src", "dst"], how="left_anti")
 
         # Update state
-        updated_vertices = vertices_state.unionByName(new_nodes_filtered).dropDuplicates()
-        updated_edges = edges_state.unionByName(new_edges_filtered).dropDuplicates()
+        updated_vertices = vertices_state.unionByName(new_nodes_filtered).dropDuplicates(subset=["id"])
+        updated_edges = edges_state.unionByName(updated_edges).dropDuplicates(subset=["src", "dst", "timestamp"])
 
         # Persist updated state back to storage
-        updated_vertices.write.mode("overwrite").format("parquet").save(self.vertices_path)
-        updated_edges.write.mode("overwrite").format("parquet").save(self.edges_path)
+        saveState(self, updated_vertices, updated_edges)
 
         # Reload updated state from Parquet to ensure it includes all persisted data
-        all_vertices = self.spark.read.format("parquet").load(self.vertices_path)
-        all_edges = self.spark.read.format("parquet").load(self.edges_path)
+        all_vertices, all_edges = loadState(self)
 
         # # Print all vertices and edges
         # print("All vertices processed so far:")
@@ -307,30 +323,30 @@ class TILES:
             # self.edges = updated_edges
 
         printMsg("before theDataframe")
-        if all_edges:
-            all_edges = update_graph_with_edges(all_edges, new_edges)
+        # if all_edges:
+        #     all_edges = update_graph_with_edges(all_edges, new_edges)
 
-        saveState(self, edges=all_edges)
+        # saveState(self, edges=all_edges)
+        # all_vertices, all_edges = loadState(self)
 
-        all_vertices, all_edges = loadState(self)
         # Add or update the edges in the GraphFrame
         # if self.g:
         #     self.g = update_graph_with_edges(self.g, new_edges)
 
-        # common_neighbors = evolution(all_edges, new_edges)
 
         printMsg(" Before detect_common_neighbors")
-        common_neighbors = detect_common_neighbors(all_edges, new_edges)
+        # common_neighbors = evolution(all_edges, new_edges)
+        # common_neighbors = detect_common_neighbors(all_edges, new_edges)
         printMsg(" After detect_common_neighbors")
-        printTrace("Common Neighbors:", common_neighbors)
+        # printTrace("Common Neighbors:", common_neighbors)
 
-        common_neighbors_analysis(self, all_vertices, common_neighbors)
+        # common_neighbors_analysis(self, all_vertices, common_neighbors)
 
 
         # Show the updated edges (debugging)
-        printMsg("graph edges:")
+        # printMsg("graph edges:")
         # self.g.edges.show(truncate=False)
-        printMsg("graph nodes:")
+        # printMsg("graph nodes:")
         # self.g.vertices.show(truncate=False)
 
 def saveState(self, vertices: DataFrame = None, edges: DataFrame = None):
@@ -338,13 +354,11 @@ def saveState(self, vertices: DataFrame = None, edges: DataFrame = None):
     Saves the current state of vertices and edges to Parquet files.
     """
     if vertices is not None and not vertices.isEmpty():
-        print("Saving state of vertices: ")
-        print(vertices.show())
+        printTrace("Saving state of vertices: ", vertices)
         vertices.write.mode("overwrite").format("parquet").save(self.vertices_path)
 
     if edges is not None and not edges.isEmpty():
-        print("Saving state of edges: ")
-        print(edges.show())
+        printTrace("Saving state of edges: ", edges)
         edges.write.mode("overwrite").format("parquet").save(self.edges_path)
 
 
@@ -705,6 +719,7 @@ def detect_common_neighbors(all_edges: DataFrame, edge_updates):
 
 def printMsg(msg):
     print(time.ctime() + " " + msg)
+
 # def detect_common_neighbors(self, edge_updates):
 #     """
 #     Detect common neighbors for edges in the batch using GraphFrames.
@@ -822,62 +837,82 @@ def remove_edge_from_graph(graph:GraphFrame, df_to_remove: DataFrame):
     return
 
 
-def printTrace(str: string, df: DataFrame):
-    printMsg(str)
-    # df.show()
+def printTrace(msg: string, df: DataFrame):
+    printMsg(msg)
+    if df:
+        df.show(100)
 
 def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
     # Current edges in the graph
-    existing_edges = all_edges.alias("existing")
+    new_edges = new_edges.withColumn(
+        "edge_key", F.array(F.col("src"), F.col("dst"))
+    )
 
-    # Alias the new edges DataFrame
-    new_edges = new_edges.alias("new")
+    printTrace("new_edges (with key): ", new_edges)
 
-    # printMsg("existing_edges:")
-    # existing_edges.show()
-    # printMsg("new_edges:")
-    # new_edges.show()
-    # Update existing edges: sum weights and update timestamps/tags
-    updated_edges = existing_edges.join(
-        new_edges,
+    aggregated_new_edges = (
+        new_edges.groupBy("edge_key")
+        .agg(
+            F.first("src").alias("src"),
+            F.first("dst").alias("dst"),
+            F.max("timestamp").alias("timestamp"),              # Take the latest timestamp
+            F.flatten(F.collect_list("tags")).alias("tags"),    # Combine tags
+            F.sum("weight").alias("weight")                     # Sum the weights
+        )
+        .drop("edge_key")  # Drop the helper column
+    )
+
+    printTrace("aggregated_new_edges (without key): ", aggregated_new_edges)
+
+    edges_state = all_edges.alias("existing")
+
+    printTrace("edges_state", edges_state)
+
+    # Keep in mind the 'weight' here, if something's wrong later on with that
+
+    existing_edges = (
+        edges_state
+        .join(
+            aggregated_new_edges.alias("new"),
+            (F.col("existing.src") == F.col("new.src")) & (F.col("existing.dst") == F.col("new.dst")),
+        )
+        .select(
+            F.col("existing.src"),
+            F.col("existing.dst"),
+            (F.col("existing.weight") + F.col("new.weight")).alias("weight"),  # Increment weight
+            F.greatest(F.col("existing.timestamp"), F.col("new.timestamp")).alias("timestamp"),  # Latest timestamp
+            F.flatten(F.array(F.col("existing.tags"), F.col("new.tags"))).alias("tags"),  # Merge tags
+        )
+    )
+
+    printTrace("existing_edges: ", existing_edges)
+
+    new_edges_only = aggregated_new_edges.alias("new").join(
+        edges_state,
         (F.col("existing.src") == F.col("new.src")) & (F.col("existing.dst") == F.col("new.dst")),
-        "left_outer"
-        # "inner"
-    ).select(
-        F.col("existing.src").alias("src"),
-        F.col("existing.dst").alias("dst"),
-        # Update weight if new value exists; otherwise, keep the old weight
-        F.when(F.col("new.weight").isNotNull(), F.col("existing.weight") + F.col("new.weight"))
-        .otherwise(F.col("existing.weight")).alias("weight"),
-        # Use the latest timestamp where available
-        F.coalesce(F.col("new.timestamp"), F.col("existing.timestamp")).alias("timestamp"),
-        # Combine tags if new tags are available; otherwise, keep old tags
-        F.coalesce(F.col("new.tags"), F.col("existing.tags")).alias("tags")
+        "left_anti"
     )
 
-    # printMsg('updated_edges:')
-    # updated_edges.show()
+    printTrace("new_edges_only: ", new_edges_only)
 
-    # Add new edges: those not present in the current edges
-    added_edges = new_edges.join(
-        existing_edges,
-        (F.col("new.src") == F.col("existing.src")) & (F.col("new.dst") == F.col("existing.dst")),
-        "anti"
-    ).select(
-        F.col("new.src").alias("src"),
-        F.col("new.dst").alias("dst"),
-        F.col("new.weight").alias("weight"),
-        F.col("new.timestamp").alias("timestamp"),
-        F.col("new.tags").alias("tags")
+    # Ensure tags column in both DataFrames has the same type
+    existing_edges = existing_edges.withColumn(
+        "tags", F.col("tags").cast(ArrayType(StringType()))
+    )
+    new_edges_only = new_edges_only.withColumn(
+        "tags", F.col("tags").cast(ArrayType(StringType()))
     )
 
-    printMsg('added_edges:') # TODO CHECK THIS - MIGHT NOT WORKING - ALWAYS EMPTY
-    added_edges.show()
-    # Combine updated and added edges
-    final_edges = updated_edges.unionByName(added_edges)
+    # Step 4: Combine updated existing edges and new edges
+    final_edges = existing_edges.unionByName(new_edges_only)
 
-    # printMsg('final_edges:')
-    # final_edges.show()
+    printTrace("final_edges: ", final_edges)
 
-    # Return a new Dataframe with updated edges
+    # Step 5: Ensure no duplicate edges and deduplicate tags
+    final_edges = final_edges.withColumn(
+        "tags", F.array_distinct("tags")
+    )
+
+    printTrace("final_edges flattened tags: ", final_edges)
+
     return final_edges
