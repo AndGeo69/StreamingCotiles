@@ -78,6 +78,8 @@ class TILES:
 
         self.vertices_path = "/home/bigdata/PycharmProjects/SparkStreamingCotiles/parquet/vertices"
         self.edges_path = "/home/bigdata/PycharmProjects/SparkStreamingCotiles/parquet/edges"
+        self.communities_path = "/home/bigdata/PycharmProjects/SparkStreamingCotiles/parquet/communities"
+        self.communityTags_path = "/home/bigdata/PycharmProjects/SparkStreamingCotiles/parquet/communityTags"
 
         self.spark = spark
 
@@ -92,8 +94,21 @@ class TILES:
             StructField("tags", ArrayType(StringType()), True),
             StructField("weight", IntegerType(), True)
         ])
+
+        self.communities_schema = StructType([
+            StructField("cid", StringType(), True),
+            StructField("nodes", ArrayType(StringType()), True),
+        ])
+
+        self.communityTags_schema = StructType([
+            StructField("cid", StringType(), True),
+            StructField("tags", ArrayType(StringType()), True)
+        ])
+
         clear_directory(self.vertices_path)
         clear_directory(self.edges_path)
+        clear_directory(self.communities_path)
+        clear_directory(self.communityTags_path)
 
     def execute(self, batch_df: DataFrame, batch_id):
         """
@@ -170,7 +185,7 @@ class TILES:
                                              F.lit(1).alias("weight"))
 
         # Load previous state
-        vertices_state, edges_state = loadState(self)
+        vertices_state, edges_state = loadStateVerticesAndEdges(self)
 
         updated_edges = update_graph_with_edges(edges_state, new_edges).dropDuplicates(subset=["src", "dst", "timestamp"])
 
@@ -182,165 +197,20 @@ class TILES:
         updated_edges = edges_state.unionByName(updated_edges).dropDuplicates(subset=["src", "dst", "timestamp"])
 
         # Persist updated state back to storage
-        saveState(self, updated_vertices, updated_edges)
+        saveStateVerticesAndEdges(self, updated_vertices, updated_edges)
 
         # Reload updated state from Parquet to ensure it includes all persisted data
-        all_vertices, all_edges = loadState(self)
+        all_vertices, all_edges = loadStateVerticesAndEdges(self)
 
-        # # Print all vertices and edges
-        # print("All vertices processed so far:")
-        # all_vertices.show()
-        #
-        # print("All edges processed so far:")
-        # all_edges.show()
-
-        # if self.vertices is None or self.edges is None:
-        #     if not self.vertices:
-        #         self.vertices = new_nodes
-        #     if not self.edges:
-        #         self.edges = new_edges
-        # else:
-        # Filter new vertices
-        # new_nodes_filtered = new_nodes.join(self.vertices.select("id"), on="id", how="left_anti").dropDuplicates()
-        #
-        # # Filter new edges
-        # new_edges_filtered = new_edges.join(self.edges.select("src", "dst"), on=["src", "dst"],
-        #                                     how="left_anti").dropDuplicates()
-        #
-        # printTrace("new_nodes_filtered", new_nodes_filtered)
-        # printTrace("new_edges_filtered", new_edges_filtered)
-
-#         def process_vertices(group_key: Any, rows: Iterable[pd.DataFrame]) -> pd.DataFrame:
-#             """
-#             This function processes the incoming rows and returns the updated vertices state as a Pandas DataFrame.
-#             It combines the state from the current microbatch and the previous state.
-#             """
-#             # Convert incoming rows to a single Pandas DataFrame
-#             pdf = pd.concat(rows)
-#
-#             # Retrieve the current state if it exists
-#             if hasattr(process_vertices, 'state'):
-#                 current_state = process_vertices.state
-#             else:
-#                 current_state = pd.DataFrame(columns=["id", "c_coms"])
-#
-#             # Combine the current state with the new data (new nodes)
-#             updated_state = pd.concat([current_state, pdf]).drop_duplicates(subset=["id"])
-#
-#             # Save the updated state back to the function for future batches
-#             process_vertices.state = updated_state  # Keep the state for the next batch
-#
-#             return updated_state
-#
-#         def process_edges(group_key: Any, rows: Iterable[pd.DataFrame]) -> pd.DataFrame:
-#             """
-#             This function processes the incoming rows and returns the updated edges state as a Pandas DataFrame.
-#             It combines the state from the current microbatch and the previous state.
-#             """
-#             # Convert incoming rows to a single Pandas DataFrame
-#             pdf = pd.concat(rows)
-#
-#             # Retrieve the current state if it exists
-#             if hasattr(process_edges, 'state'):
-#                 current_state = process_edges.state
-#             else:
-#                 current_state = pd.DataFrame(columns=["src", "dst", "timestamp", "tags", "weight"])
-#
-#             # Combine the current state with the new data (new edges)
-#             updated_state = pd.concat([current_state, pdf]).drop_duplicates(subset=["src", "dst"])
-#
-#             # Save the updated state back to the function for future batches
-#             process_edges.state = updated_state  # Keep the state for the next batch
-#
-#             return updated_state
-#
-#         # def process_vertices(group_key: Any, rows: Iterable[pd.DataFrame], state: GroupState) -> Iterable[pd.DataFrame]:
-#         #     # Convert rows (Iterable of Pandas DataFrames) into a single Pandas DataFrame
-#         #     pdf = pd.concat(rows)
-#         #     # Retrieve the current state
-#         #     if state.exists:
-#         #         current_state = pd.DataFrame(state, columns=["id", "c_coms"])
-#         #     else:
-#         #         current_state = pd.DataFrame(columns=["id", "c_coms"])
-#         #     # Combine the current state with the incoming data
-#         #     updated_state = pd.concat([current_state, pdf]).drop_duplicates(subset=["id"])
-#         #     # Update the state
-#         #     state.update((updated_state.to_dict(orient="records")))
-#         #     # Return the updated state as an iterable (e.g., a list containing a single DataFrame)
-#         #     yield updated_state
-#         #
-#         # def process_edges(group_key: Any, rows: Iterable[pd.DataFrame], state: GroupState) -> Iterable[pd.DataFrame]:
-#         #     # Convert rows (Iterable of Pandas DataFrames) into a single Pandas DataFrame
-#         #     pdf = pd.concat(rows)
-#         #     # Retrieve the current state
-#         #     if state.exists:
-#         #         current_state = pd.DataFrame(state, columns=["src", "dst", "timestamp", "tags", "weight"])
-#         #     else:
-#         #         current_state = pd.DataFrame(columns=["src", "dst", "timestamp", "tags", "weight"])
-#         #     # Combine the current state with the incoming data
-#         #     updated_state = pd.concat([current_state, pdf]).drop_duplicates(subset=["src", "dst"])
-#         #     # Update the state
-#         #     state.update((updated_state.to_dict(orient="records")))
-#         #     # Return the updated state as an iterable (e.g., a list containing a single DataFrame)
-#         #     yield updated_state
-#
-#         # vertices_state_df = new_nodes.withColumn("key", F.lit("vertices")).groupBy("key").applyInPandasWithState(
-#         #     func=process_vertices,
-#         #     stateStructType=self.vertices_schema,
-#         #     outputStructType=self.vertices_schema,
-#         #     outputMode="update",
-#         #     timeoutConf="NoTimeout"
-#         # )
-#         #
-#         # # Use applyInPandasWithState for edges
-#         # edges_state_df = new_edges.withColumn("key", F.lit("edges")).groupBy("key").applyInPandasWithState(
-#         #     func=process_edges,
-#         #     stateStructType=self.edges_schema,
-#         #     outputStructType=self.edges_schema,
-#         #     outputMode="update",
-#         #     timeoutConf="NoTimeout"
-#         # )
-#
-# # NOTHING WORKS IN PYSPARK API - TRY STATE STORAGE SMH - OTHERWISE JUMP INTO SCALA ??????
-#         vertices_state_df = new_nodes.withColumn("key", F.lit("vertices")).groupBy("key").applyInPandas(
-#             func=process_vertices,
-#             schema=self.vertices_schema
-#         )
-#
-#         edges_state_df = new_edges.withColumn("key", F.lit("edges")).groupBy("key").applyInPandas(
-#             func=process_edges,
-#             schema=self.edges_schema
-#         )
-
-        # # Update vertices and edges
-            # updated_vertices = self.vertices.unionByName(new_nodes_filtered).distinct()
-            # updated_edges = self.edges.unionByName(new_edges_filtered).distinct()
-            #
-            # printTrace("updated_vertices", updated_vertices)
-            # printTrace("updated_edges", updated_edges)
-            #
-            # self.vertices = updated_vertices
-            # self.edges = updated_edges
-
-        printMsg("before theDataframe")
-        # if all_edges:
-        #     all_edges = update_graph_with_edges(all_edges, new_edges)
-
-        # saveState(self, edges=all_edges)
-        # all_vertices, all_edges = loadState(self)
-
-        # Add or update the edges in the GraphFrame
-        # if self.g:
-        #     self.g = update_graph_with_edges(self.g, new_edges)
-
-
-        printMsg(" Before detect_common_neighbors")
-        # common_neighbors = evolution(all_edges, new_edges)
+        common_neighbors = evolution(all_edges, new_edges)
+        printTrace("Common_neighbors: ", common_neighbors)
         # common_neighbors = detect_common_neighbors(all_edges, new_edges)
-        printMsg(" After detect_common_neighbors")
+        # printMsg(" After detect_common_neighbors")
         # printTrace("Common Neighbors:", common_neighbors)
 
         # common_neighbors_analysis(self, all_vertices, common_neighbors)
+
+        analyze_common_neighbors(common_neighbors, all_vertices)
 
 
         # Show the updated edges (debugging)
@@ -349,35 +219,116 @@ class TILES:
         # printMsg("graph nodes:")
         # self.g.vertices.show(truncate=False)
 
-def saveState(self, vertices: DataFrame = None, edges: DataFrame = None):
+def saveStateVerticesAndEdges(self, vertices: DataFrame = None, edges: DataFrame = None):
     """
     Saves the current state of vertices and edges to Parquet files.
     """
-    if vertices is not None and not vertices.isEmpty():
-        printTrace("Saving state of vertices: ", vertices)
-        vertices.write.mode("overwrite").format("parquet").save(self.vertices_path)
+    saveState(dataframeToBeSaved=vertices, pathToBeSaved=self.vertices_path)
+    saveState(dataframeToBeSaved=edges, pathToBeSaved=self.edges_path)
 
-    if edges is not None and not edges.isEmpty():
-        printTrace("Saving state of edges: ", edges)
-        edges.write.mode("overwrite").format("parquet").save(self.edges_path)
+def saveState(dataframeToBeSaved: DataFrame, pathToBeSaved: str):
+    if dataframeToBeSaved is not None and not dataframeToBeSaved.isEmpty():
+        printTrace("Saving state of dataframeToBeSaved: ", dataframeToBeSaved)
+        dataframeToBeSaved.write.mode("overwrite").format("parquet").save(pathToBeSaved)
 
-
-def loadState(self):
+def loadState(self, pathToload: str, schemaToCreate: str = None):
     """
     Loads the state of vertices and edges from Parquet files.
     If no state exists, returns empty DataFrames with the appropriate schema.
     """
     try:
-        vertices = self.spark.read.format("parquet").load(self.vertices_path)
+        loadedDataframe = self.spark.read.format("parquet").load(pathToload)
     except Exception:  # Handle case where file does not exist
-        vertices = self.spark.createDataFrame([], self.vertices_schema)
+        loadedDataframe = self.spark.createDataFrame([], schemaToCreate)
 
-    try:
-        edges = self.spark.read.format("parquet").load(self.edges_path)
-    except Exception:  # Handle case where file does not exist
-        edges = self.spark.createDataFrame([], self.edges_schema)
+    return loadedDataframe
 
+
+def loadStateVerticesAndEdges(self):
+    vertices = loadState(self=self, pathToload=self.vertices_path, schemaToCreate=self.vertices_schema)
+    edges = loadState(self=self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
     return vertices, edges
+
+
+def analyze_common_neighbors(common_neighbors: DataFrame, all_vertices: DataFrame) -> (DataFrame, DataFrame):
+    # Step 1: Join to fetch community info for `src` and `dst`
+
+    if common_neighbors.isEmpty():
+        return
+
+    common_neighbors = (
+        common_neighbors
+        .join(all_vertices.alias("u_info"), common_neighbors["node_u"] == F.col("u_info.id"), "left")
+        .join(all_vertices.alias("v_info"), common_neighbors["node_v"] == F.col("v_info.id"), "left")
+        .select(
+            F.col("node_u"), F.col("node_v"),
+            F.col("common_neighbors"),
+            F.col("u_info.c_coms").alias("src_coms"),
+            F.col("v_info.c_coms").alias("dst_coms"),
+            F.col("tags"), F.col("timestamp"), F.col("weight")
+        )
+    )
+
+    printTrace("common_neighbors NEW: ", common_neighbors)
+
+    # Step 2: Compute community differences
+    common_neighbors = (
+        common_neighbors
+        .withColumn("shared_coms", F.array_intersect(F.col("src_coms"), F.col("dst_coms")))
+        .withColumn("only_u", F.array_except(F.col("src_coms"), F.col("dst_coms")))
+        .withColumn("only_v", F.array_except(F.col("dst_coms"), F.col("src_coms")))
+    )
+    printTrace("common_neighbors intersected NEW: ", common_neighbors)
+
+    # Step 3: Explode `common_neighbors` for propagation analysis
+    common_neighbors = (
+        common_neighbors
+        .filter(F.size(F.col("common_neighbors")) > 0)
+        .withColumn("common_neighbor", F.explode(F.col("common_neighbors")))
+    )
+
+    printTrace("common neighbors exploded intersected NEW: ", common_neighbors)
+
+    # Step 4: Add `propagated` column to `common_neighbors`
+    common_neighbors = (
+        common_neighbors
+        .withColumn(
+            "propagated",
+            F.when(F.size(F.array_intersect(F.col("only_v"), F.col("src_coms"))) > 0, True)
+            .when(F.size(F.array_intersect(F.col("only_u"), F.col("dst_coms"))) > 0, True)
+            .otherwise(False)
+        )
+    )
+    printTrace("common_neighbors propagated NEW: ", common_neighbors)
+
+    # Step 5: Separate propagated edges
+    propagated_edges = (
+        common_neighbors
+        .filter(F.col("propagated") == True)
+        .select(
+            F.col("node_u"), F.col("node_v"), F.col("common_neighbor"),
+            F.col("tags"), F.col("timestamp"), F.col("weight"),
+            F.col("shared_coms"), F.col("only_u"), F.col("only_v")
+        )
+    )
+    printTrace("propagated_edges NEW: ", propagated_edges)
+
+    # Step 6: Identify new community edges
+    new_community_edges = (
+        common_neighbors
+        .filter(F.col("shared_coms").isNull() | (F.size(F.col("shared_coms")) == 0))
+        .filter(F.col("propagated") == False)
+        .select(
+            F.col("node_u"), F.col("node_v"),
+            F.col("tags"), F.col("timestamp"), F.col("weight")
+        )
+        .withColumn("new_community_id", F.monotonically_increasing_id())
+    )
+
+    printTrace("new_community_edges NEW: ", new_community_edges)
+
+
+    return propagated_edges, new_community_edges
 
 
 def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: DataFrame):
@@ -389,6 +340,8 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
     if common_neighbors.isEmpty():
         return
 
+    common_neighbors = common_neighbors.withColumnsRenamed({'node_u':'src', 'node_v':'dst'})
+
     # Step 1: Filter out null common_neighbors and explode to one row per common_neighbor
     common_neighbors = (
         common_neighbors
@@ -396,14 +349,16 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
         .withColumn("common_neighbor", F.explode(F.col("common_neighbors")))
     )
 
+    printTrace("common_neighbors: ", common_neighbors)
+
     # Step 2: Reshape common_neighbors for a single join (avoiding double join)
     common_neighbors_reshaped = (
         common_neighbors
         .select(
             F.col("src").alias("node_id"),
             F.col("dst").alias("other_node_id"),
-            F.col("timestamp"),
             F.col("tags"),
+            F.col("timestamp"),
             F.col("weight"),
             F.col("common_neighbors")
         )
@@ -412,8 +367,8 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
             .select(
                 F.col("dst").alias("node_id"),
                 F.col("src").alias("other_node_id"),
-                F.col("timestamp"),
                 F.col("tags"),
+                F.col("timestamp"),
                 F.col("weight"),
                 F.col("common_neighbors")
             )
@@ -426,6 +381,8 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
         .withColumnRenamed("node_id", "src")
         .withColumnRenamed("other_node_id", "dst")
     )
+
+    printTrace("common_neighbors_reshaped: ", common_neighbors_reshaped)
 
     # Step 3: Join with vertices DataFrame once
     # Perform the join once and get community information for both src and dst
@@ -444,8 +401,9 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
         )
     )
 
-    printMsg("common_neighbors_analysis: AFTER single join with vertices")
+    printTrace("shared_coms: ", shared_coms)
 
+    # printMsg("common_neighbors_analysis: AFTER single join with vertices")
     # # Step 1: Filter out null common_neighbors and explode to one row per common_neighbor
     # common_neighbors = (
     #     common_neighbors
@@ -471,7 +429,7 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
     #         F.col("vertices_v.c_coms").alias("dst_coms")
     #     )
     # )
-    printMsg("common_neighbors_analysis: AFTER common_neighbors double join w/ vertices")
+    # printMsg("common_neighbors_analysis: AFTER common_neighbors double join w/ vertices")
 
 
     printMsg("common_neighbors_analysis: BEFORE intersecting")
@@ -482,10 +440,10 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
         .withColumn("only_u", F.array_except(F.col("src_coms"), F.col("dst_coms")))
         .withColumn("only_v", F.array_except(F.col("dst_coms"), F.col("src_coms")))
     )
-    printMsg("common_neighbors_analysis: AFTER intersecting")
+
+    printTrace("shared_coms After intersecting arrays : ", shared_coms)
 
     # Step 4: Rename and reselect columns in the final DataFrame
-    printMsg("common_neighbors_analysis: BEFORE shared_coms selecting")
     shared_coms = (
         shared_coms
         .select(
@@ -502,14 +460,8 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
             F.col("only_v")
         )
     )
-    printMsg("common_neighbors_analysis: AFTER shared_coms selecting")
-
-
-    printMsg("shared_coms")
-    # printTrace("shared_coms", shared_coms)
 
     # Propagate 'src' logic: Propagate src if 'common_neighbor' is in 'only_v'
-    printMsg("common_neighbors_analysis: BEFORE shared_coms propagated expression ")
     propagated = shared_coms.withColumn(
         "propagated",
         F.when(
@@ -519,11 +471,10 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
             True
         ).otherwise(False)
     )
-    printMsg("common_neighbors_analysis: AFTER shared_coms propagated expression ")
 
     #  TODO check common_neighbors list might need an exploded one
 
-    printMsg("propagated")
+    printTrace("propagated: ", propagated)
     # printTrace("propagated", propagated)
 
     propagated = propagated.withColumn("community_id", F.monotonically_increasing_id())
@@ -551,17 +502,17 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
                                 )
                             )
 
-    # printTrace("node propagted FASLE", nodesToBeAddedToCom)
-    # printTrace("node propagted TRUE", prexistingCommunities)
+    printTrace("node propagted FASLE", nodesToBeAddedToCom)
+    printTrace("node propagted TRUE", prexistingCommunities)
 
-    printMsg(" BEFORE add to community") # TODO Handle prexistingCommunities !!
-    print("nodesToBeAddedToCom:")
-    print(nodesToBeAddedToCom.show())
+    # printMsg(" BEFORE add to community") # TODO Handle prexistingCommunities !!
+    # print("nodesToBeAddedToCom:")
+    # print(nodesToBeAddedToCom.show())
 
     # add_to_community(self, nodesToBeAddedToCom)
-    printMsg(" AFTER add to community")
-    print("nodesToBeAddedToCom:")
-    print(prexistingCommunities.show())
+    # printMsg(" AFTER add to community")
+    # print("nodesToBeAddedToCom:")
+    # print(prexistingCommunities.show())
 
 
     # if prexistingCommunities is not None:
@@ -658,7 +609,7 @@ def add_to_community(self, toBeAddedDf: DataFrame):
 #
 #     return common_neighbors_filtered
 
-def detect_common_neighbors(all_edges: DataFrame, edge_updates):
+def detect_common_neighbors(all_edges: DataFrame, detected_common_neighbors):
     """
     Detect common neighbors for edges in the batch using GraphFrames.
     """
@@ -688,7 +639,7 @@ def detect_common_neighbors(all_edges: DataFrame, edge_updates):
     )
 
     # Step 2: Perform one join with flattened neighbor DataFrames
-    edge_neighbors = edge_updates.join(src_neighbors, on="src", how="left") \
+    edge_neighbors = detected_common_neighbors.join(src_neighbors, on="src", how="left") \
         .join(dst_neighbors, on="dst", how="left")
 
     # edge_neighbors = (
@@ -751,6 +702,50 @@ def printMsg(msg):
 #
 #     return common_neighbors_filtered
 
+# def evolution(all_edges: DataFrame, edge_updates: DataFrame):
+#     # Extract neighbors for both source (u) and destination (v)
+#     neighbors = all_edges.select(
+#         F.col("src").alias("node"),
+#         F.col("dst").alias("neighbor")
+#     ).union(
+#         all_edges.select(
+#             F.col("dst").alias("node"),
+#             F.col("src").alias("neighbor")
+#         )
+#     ).distinct()  # Ensure no duplicate (node, neighbor) pairs
+#
+#     # Calculate neighbor counts for all nodes
+#     neighbor_counts = neighbors.groupBy("node").agg(F.count("neighbor").alias("neighbor_count"))
+#
+#     # Filter for nodes with more than one neighbor (u_n and v_n conditions)
+#     valid_neighbors = neighbor_counts.filter(F.col("neighbor_count") > 1).select("node")
+#
+#     # Join edges with valid nodes to ensure u and v both meet the condition
+#     valid_edges = (
+#         edge_updates.alias("valid_edges")
+#         .join(valid_neighbors.alias("valid_u"), F.col("valid_edges.src") == F.col("valid_u.node"))
+#         .join(valid_neighbors.alias("valid_v"), F.col("valid_edges.dst") == F.col("valid_v.node"))
+#         .select("valid_edges.*")  # Only include columns from edge_updates
+#     )
+#
+#     # Find common neighbors for valid (u, v) pairs
+#     common_neighbors = (
+#         valid_edges
+#         .join(neighbors.alias("u_neighbors"), F.col("valid_edges.src") == F.col("u_neighbors.node"), "inner")
+#         .join(neighbors.alias("v_neighbors"), F.col("valid_edges.dst") == F.col("v_neighbors.node"), "inner")
+#         .filter(F.col("u_neighbors.neighbor") == F.col("v_neighbors.neighbor"))
+#         .select(
+#             F.col("valid_edges.src").alias("node_u"),
+#             F.col("valid_edges.dst").alias("node_v"),
+#             F.col("u_neighbors.neighbor").alias("common_neighbor")
+#         )
+#         .groupBy("node_u", "node_v")
+#         .agg(F.collect_set("common_neighbor").alias("common_neighbors"))
+#     )
+#
+#     return common_neighbors
+
+
 def evolution(all_edges: DataFrame, edge_updates: DataFrame):
     # Extract neighbors for both source (u) and destination (v)
     neighbors = all_edges.select(
@@ -761,7 +756,7 @@ def evolution(all_edges: DataFrame, edge_updates: DataFrame):
             F.col("dst").alias("node"),
             F.col("src").alias("neighbor")
         )
-    )
+    ).distinct()
 
     # Calculate neighbor counts for all nodes
     neighbor_counts = neighbors.groupBy("node").agg(F.count("neighbor").alias("neighbor_count"))
@@ -785,9 +780,12 @@ def evolution(all_edges: DataFrame, edge_updates: DataFrame):
         .select(
             F.col("edges.src").alias("node_u"),
             F.col("edges.dst").alias("node_v"),
-            F.col("u_neighbors.neighbor").alias("common_neighbor")
+            F.col("u_neighbors.neighbor").alias("common_neighbor"),
+            F.col("edges.tags").alias("tags"),
+            F.col("edges.timestamp").alias("timestamp"),
+            F.col("edges.weight").alias("weight")
         )
-        .groupBy("node_u", "node_v")
+        .groupBy("node_u", "node_v", "tags", "timestamp", "weight")
         .agg(F.collect_set("common_neighbor").alias("common_neighbors"))
     )
 
@@ -840,7 +838,7 @@ def remove_edge_from_graph(graph:GraphFrame, df_to_remove: DataFrame):
 def printTrace(msg: string, df: DataFrame):
     printMsg(msg)
     if df:
-        df.show(100)
+        df.show(50)
 
 def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
     # Current edges in the graph
@@ -848,7 +846,7 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
         "edge_key", F.array(F.col("src"), F.col("dst"))
     )
 
-    printTrace("new_edges (with key): ", new_edges)
+    # printTrace("new_edges (with key): ", new_edges)
 
     aggregated_new_edges = (
         new_edges.groupBy("edge_key")
@@ -862,11 +860,11 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
         .drop("edge_key")  # Drop the helper column
     )
 
-    printTrace("aggregated_new_edges (without key): ", aggregated_new_edges)
+    # printTrace("aggregated_new_edges (without key): ", aggregated_new_edges)
 
     edges_state = all_edges.alias("existing")
 
-    printTrace("edges_state", edges_state)
+    # printTrace("edges_state", edges_state)
 
     # Keep in mind the 'weight' here, if something's wrong later on with that
 
@@ -885,7 +883,7 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
         )
     )
 
-    printTrace("existing_edges: ", existing_edges)
+    # printTrace("existing_edges: ", existing_edges)
 
     new_edges_only = aggregated_new_edges.alias("new").join(
         edges_state,
@@ -893,7 +891,7 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
         "left_anti"
     )
 
-    printTrace("new_edges_only: ", new_edges_only)
+    # printTrace("new_edges_only: ", new_edges_only)
 
     # Ensure tags column in both DataFrames has the same type
     existing_edges = existing_edges.withColumn(
@@ -906,13 +904,13 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
     # Step 4: Combine updated existing edges and new edges
     final_edges = existing_edges.unionByName(new_edges_only)
 
-    printTrace("final_edges: ", final_edges)
+    # printTrace("final_edges: ", final_edges)
 
     # Step 5: Ensure no duplicate edges and deduplicate tags
     final_edges = final_edges.withColumn(
         "tags", F.array_distinct("tags")
     )
 
-    printTrace("final_edges flattened tags: ", final_edges)
+    # printTrace("final_edges flattened tags: ", final_edges)
 
     return final_edges
