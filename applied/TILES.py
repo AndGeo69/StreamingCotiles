@@ -7,7 +7,7 @@ import time
 from typing import Tuple, Iterator, Any, Iterable
 
 from graphframes import GraphFrame
-from pyspark.sql import functions as F
+from pyspark.sql import functions as F, Window
 from pyspark.sql.functions import min
 from pyspark.sql.streaming.state import GroupState
 from pyspark.sql.types import StructType, StringType, StructField, ArrayType, IntegerType
@@ -202,6 +202,7 @@ class TILES:
         # Reload updated state from Parquet to ensure it includes all persisted data
         all_vertices, all_edges = loadStateVerticesAndEdges(self)
 
+        printTrace("new edges: ", new_edges)
         common_neighbors = evolution(all_edges, new_edges)
         printTrace("Common_neighbors: ", common_neighbors)
         # common_neighbors = detect_common_neighbors(all_edges, new_edges)
@@ -210,8 +211,15 @@ class TILES:
 
         # common_neighbors_analysis(self, all_vertices, common_neighbors)
 
-        analyze_common_neighbors(common_neighbors, all_vertices)
+        propagated_edges, new_community_edges = None, None
 
+        propagated_edges, new_community_edges = analyze_common_neighbors(common_neighbors, all_vertices)
+
+        if new_community_edges is not None:
+            communitiesDf = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
+            communityTagsDf = loadState(self=self, pathToload=self.communityTags_path, schemaToCreate=self.communityTags_schema)
+
+            add_to_community_streaming(new_community_edges, communitiesDf, communityTagsDf)
 
         # Show the updated edges (debugging)
         # printMsg("graph edges:")
@@ -219,42 +227,12 @@ class TILES:
         # printMsg("graph nodes:")
         # self.g.vertices.show(truncate=False)
 
-def saveStateVerticesAndEdges(self, vertices: DataFrame = None, edges: DataFrame = None):
-    """
-    Saves the current state of vertices and edges to Parquet files.
-    """
-    saveState(dataframeToBeSaved=vertices, pathToBeSaved=self.vertices_path)
-    saveState(dataframeToBeSaved=edges, pathToBeSaved=self.edges_path)
-
-def saveState(dataframeToBeSaved: DataFrame, pathToBeSaved: str):
-    if dataframeToBeSaved is not None and not dataframeToBeSaved.isEmpty():
-        printTrace("Saving state of dataframeToBeSaved: ", dataframeToBeSaved)
-        dataframeToBeSaved.write.mode("overwrite").format("parquet").save(pathToBeSaved)
-
-def loadState(self, pathToload: str, schemaToCreate: str = None):
-    """
-    Loads the state of vertices and edges from Parquet files.
-    If no state exists, returns empty DataFrames with the appropriate schema.
-    """
-    try:
-        loadedDataframe = self.spark.read.format("parquet").load(pathToload)
-    except Exception:  # Handle case where file does not exist
-        loadedDataframe = self.spark.createDataFrame([], schemaToCreate)
-
-    return loadedDataframe
-
-
-def loadStateVerticesAndEdges(self):
-    vertices = loadState(self=self, pathToload=self.vertices_path, schemaToCreate=self.vertices_schema)
-    edges = loadState(self=self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
-    return vertices, edges
-
 
 def analyze_common_neighbors(common_neighbors: DataFrame, all_vertices: DataFrame) -> (DataFrame, DataFrame):
     # Step 1: Join to fetch community info for `src` and `dst`
 
     if common_neighbors.isEmpty():
-        return
+        return None, None
 
     common_neighbors = (
         common_neighbors
@@ -267,38 +245,37 @@ def analyze_common_neighbors(common_neighbors: DataFrame, all_vertices: DataFram
             F.col("v_info.c_coms").alias("dst_coms"),
             F.col("tags"), F.col("timestamp"), F.col("weight")
         )
-    )
-
-    printTrace("common_neighbors NEW: ", common_neighbors)
-
-    # Step 2: Compute community differences
-    common_neighbors = (
-        common_neighbors
+        # Ensure `src_coms` and `dst_coms` are non-null
+        .withColumn("src_coms", F.when(F.col("src_coms").isNull(), F.array()).otherwise(F.col("src_coms")))
+        .withColumn("dst_coms", F.when(F.col("dst_coms").isNull(), F.array()).otherwise(F.col("dst_coms")))
+        # Compute `only_u` and `only_v`
         .withColumn("shared_coms", F.array_intersect(F.col("src_coms"), F.col("dst_coms")))
         .withColumn("only_u", F.array_except(F.col("src_coms"), F.col("dst_coms")))
         .withColumn("only_v", F.array_except(F.col("dst_coms"), F.col("src_coms")))
     )
-    printTrace("common_neighbors intersected NEW: ", common_neighbors)
 
-    # Step 3: Explode `common_neighbors` for propagation analysis
+    printTrace("common_neighbors NEW: ", common_neighbors)
+
+    # Explode common_neighbors
     common_neighbors = (
         common_neighbors
         .filter(F.size(F.col("common_neighbors")) > 0)
         .withColumn("common_neighbor", F.explode(F.col("common_neighbors")))
     )
 
-    printTrace("common neighbors exploded intersected NEW: ", common_neighbors)
-
-    # Step 4: Add `propagated` column to `common_neighbors`
+    # Add propagated column
     common_neighbors = (
         common_neighbors
         .withColumn(
             "propagated",
-            F.when(F.size(F.array_intersect(F.col("only_v"), F.col("src_coms"))) > 0, True)
-            .when(F.size(F.array_intersect(F.col("only_u"), F.col("dst_coms"))) > 0, True)
-            .otherwise(False)
+            F.when(
+                (F.size(F.array_intersect(F.col("only_v"), F.col("src_coms"))) > 0) |
+                (F.size(F.array_intersect(F.col("only_u"), F.col("dst_coms"))) > 0),
+                True
+            ).otherwise(False)
         )
     )
+
     printTrace("common_neighbors propagated NEW: ", common_neighbors)
 
     # Step 5: Separate propagated edges
@@ -319,14 +296,22 @@ def analyze_common_neighbors(common_neighbors: DataFrame, all_vertices: DataFram
         .filter(F.col("shared_coms").isNull() | (F.size(F.col("shared_coms")) == 0))
         .filter(F.col("propagated") == False)
         .select(
-            F.col("node_u"), F.col("node_v"),
-            F.col("tags"), F.col("timestamp"), F.col("weight")
+            F.col("node_u"), F.col("node_v"), F.col("common_neighbor"),
+            F.col("tags"), F.col("timestamp"), F.col("weight"),
+            F.col("shared_coms"), F.col("only_u"), F.col("only_v")
         )
         .withColumn("new_community_id", F.monotonically_increasing_id())
     )
 
-    printTrace("new_community_edges NEW: ", new_community_edges)
+    new_community_edges = new_community_edges.withColumn(
+        "new_community_id",
+        F.when(
+            F.size(F.col("shared_coms")) > 0,
+            F.first("new_community_id").over(Window.partitionBy("node_u", "node_v"))
+        ).otherwise(F.col("new_community_id"))
+    )
 
+    printTrace("new_community_edges NEW: ", new_community_edges)
 
     return propagated_edges, new_community_edges
 
@@ -523,6 +508,57 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
     #     shared_coms, on=["src", "dst"], how="left_anti"
     # ).withColumn("community_id", F.monotonically_increasing_id())
 
+def add_to_community_streaming(new_community_edges, communitiesDf, communityTagsDf, tags_column="tags"):
+    """
+    Args:
+        new_community_edges: DataFrame containing new community information with columns
+                              [node_u, node_v, common_neighbor, tags, new_community_id]
+        communitiesDf: DataFrame containing existing communities with columns [cid, nodes]
+        communityTagsDf: DataFrame containing community tags with columns [cid, tags]
+
+    Returns:
+        Updated communitiesDf and communityTagsDf as DataFrames
+    """
+    if new_community_edges.isEmpty():
+        return
+
+    # Step 1: Process and aggregate tags by new_community_id
+    new_tags = (
+        new_community_edges
+        .select("new_community_id", tags_column)
+        .groupBy("new_community_id")
+        .agg(F.array_distinct(F.flatten(F.collect_list(tags_column))).alias("tags"))
+    )
+
+    printTrace("new_tags: ", new_tags)
+
+    # Step 2: Process and aggregate community nodes (node_u, node_v, common_neighbor)
+    new_communities = (
+        new_community_edges
+        .select("new_community_id", "node_u", "node_v", "common_neighbor")
+        .withColumn("nodes", F.array_union(F.array("node_u", "node_v", "common_neighbor"), F.array()))
+        .groupBy("new_community_id")
+        .agg(F.array_distinct(F.flatten(F.collect_list("nodes"))).alias("nodes"))
+    )
+
+    printTrace("new_communities: ", new_communities)
+    printTrace("communitiesDf: ", communitiesDf)
+    printTrace("communityTagsDf: ", communityTagsDf)
+
+    # Step 3: Combine and update communityTags and communities
+    updated_community_tags = communityTagsDf.join(new_tags, communityTagsDf.cid == new_tags.new_community_id, "outer") \
+        .select(new_tags.new_community_id, F.coalesce(new_tags.tags, communityTagsDf.tags).alias("tags"))
+
+    updated_communities = communitiesDf.join(new_communities, communitiesDf.cid == new_communities.new_community_id, "outer") \
+        .select(new_communities.new_community_id, F.coalesce(new_communities.nodes, communitiesDf.nodes).alias("nodes"))
+
+    printTrace("updated_community_tags: ", updated_community_tags)
+    printTrace("updated_communities: ", updated_communities)
+
+    return updated_communities, updated_community_tags
+
+
+
 
 def add_to_community(self, toBeAddedDf: DataFrame):
     """
@@ -579,35 +615,6 @@ def add_to_community(self, toBeAddedDf: DataFrame):
 
     # Update the graph
     self.g = GraphFrame(updated_vertices, self.g.edges)
-
-# def detect_common_neighbors2(self, edge_updates):
-#     """
-#     Detect common neighbors for edges in the batch using GraphFrames.
-#     Optimized to use a single DataFrame.
-#     """
-#
-#     # Step 1: Extract neighbors for each node in the graph
-#     edges = self.g.edges
-#     neighbors = (
-#         edges.select(F.col("src").alias("node"), F.col("dst").alias("neighbor"))
-#         .union(edges.select(F.col("dst").alias("node"), F.col("src").alias("neighbor")))
-#         .groupBy("node")
-#         .agg(F.collect_list("neighbor").alias("neighbors"))
-#     )
-#
-#     # Step 2 to Step 4: Combine edge_updates and neighbors and compute common neighbors in one DataFrame
-#     common_neighbors_filtered = (
-#         edge_updates
-#         .join(neighbors.withColumnRenamed("node", "src"), on="src", how="left")
-#         .withColumnRenamed("neighbors", "src_neighbors")
-#         .join(neighbors.withColumnRenamed("node", "dst"), on="dst", how="left")
-#         .withColumnRenamed("neighbors", "dst_neighbors")
-#         .withColumn("common_neighbors", F.array_intersect(F.col("src_neighbors"), F.col("dst_neighbors")))
-#         .filter(F.col("common_neighbors").isNotNull() & (F.size(F.col("common_neighbors")) > 0))
-#         .select("dst", "src", "timestamp", "tags", "weight", "common_neighbors")
-#     )
-#
-#     return common_neighbors_filtered
 
 def detect_common_neighbors(all_edges: DataFrame, detected_common_neighbors):
     """
@@ -914,3 +921,32 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
     # printTrace("final_edges flattened tags: ", final_edges)
 
     return final_edges
+
+def saveStateVerticesAndEdges(self, vertices: DataFrame = None, edges: DataFrame = None):
+    """
+    Saves the current state of vertices and edges to Parquet files.
+    """
+    saveState(dataframeToBeSaved=vertices, pathToBeSaved=self.vertices_path)
+    saveState(dataframeToBeSaved=edges, pathToBeSaved=self.edges_path)
+
+def saveState(dataframeToBeSaved: DataFrame, pathToBeSaved: str):
+    if dataframeToBeSaved is not None and not dataframeToBeSaved.isEmpty():
+        # printTrace("Saving state of dataframeToBeSaved: ", dataframeToBeSaved)
+        dataframeToBeSaved.write.mode("overwrite").format("parquet").save(pathToBeSaved)
+
+def loadState(self, pathToload: str, schemaToCreate: str = None):
+    """
+    Loads the state of vertices and edges from Parquet files.
+    If no state exists, returns empty DataFrames with the appropriate schema.
+    """
+    try:
+        loadedDataframe = self.spark.read.format("parquet").load(pathToload)
+    except Exception:  # Handle case where file does not exist
+        loadedDataframe = self.spark.createDataFrame([], schemaToCreate)
+
+    return loadedDataframe
+
+def loadStateVerticesAndEdges(self):
+    vertices = loadState(self=self, pathToload=self.vertices_path, schemaToCreate=self.vertices_schema)
+    edges = loadState(self=self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
+    return vertices, edges
