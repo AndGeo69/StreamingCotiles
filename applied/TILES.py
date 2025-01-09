@@ -4,16 +4,11 @@ import shutil
 import string
 import sys
 import time
-from typing import Tuple, Iterator, Any, Iterable
 
 from graphframes import GraphFrame
 from pyspark.sql import functions as F, Window
 from pyspark.sql.functions import min
-from pyspark.sql.streaming.state import GroupState
 from pyspark.sql.types import StructType, StringType, StructField, ArrayType, IntegerType
-
-import pandas as pd
-import pyarrow
 
 if sys.version_info > (2, 7):
     pass
@@ -219,7 +214,11 @@ class TILES:
             communitiesDf = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
             communityTagsDf = loadState(self=self, pathToload=self.communityTags_path, schemaToCreate=self.communityTags_schema)
 
-            add_to_community_streaming(new_community_edges, communitiesDf, communityTagsDf)
+            updated_community_tags, updated_communities, updated_vertices = add_to_community_streaming(all_vertices, new_community_edges, communitiesDf, communityTagsDf)
+
+            saveState(updated_community_tags, self.communityTags_path)
+            saveState(updated_communities, self.communities_path)
+            saveState(updated_vertices, self.vertices_path)
 
         # Show the updated edges (debugging)
         # printMsg("graph edges:")
@@ -260,7 +259,7 @@ def analyze_common_neighbors(common_neighbors: DataFrame, all_vertices: DataFram
     common_neighbors = (
         common_neighbors
         .filter(F.size(F.col("common_neighbors")) > 0)
-        .withColumn("common_neighbor", F.explode(F.col("common_neighbors")))
+        # .withColumn("common_neighbor", F.explode(F.col("common_neighbors")))
     )
 
     # Add propagated column
@@ -283,7 +282,8 @@ def analyze_common_neighbors(common_neighbors: DataFrame, all_vertices: DataFram
         common_neighbors
         .filter(F.col("propagated") == True)
         .select(
-            F.col("node_u"), F.col("node_v"), F.col("common_neighbor"),
+            F.col("node_u"), F.col("node_v"),
+            # F.col("common_neighbor"),
             F.col("tags"), F.col("timestamp"), F.col("weight"),
             F.col("shared_coms"), F.col("only_u"), F.col("only_v")
         )
@@ -296,7 +296,8 @@ def analyze_common_neighbors(common_neighbors: DataFrame, all_vertices: DataFram
         .filter(F.col("shared_coms").isNull() | (F.size(F.col("shared_coms")) == 0))
         .filter(F.col("propagated") == False)
         .select(
-            F.col("node_u"), F.col("node_v"), F.col("common_neighbor"),
+            F.col("node_u"), F.col("node_v"),
+            # F.col("common_neighbor"),
             F.col("tags"), F.col("timestamp"), F.col("weight"),
             F.col("shared_coms"), F.col("only_u"), F.col("only_v")
         )
@@ -310,6 +311,7 @@ def analyze_common_neighbors(common_neighbors: DataFrame, all_vertices: DataFram
             F.first("new_community_id").over(Window.partitionBy("node_u", "node_v"))
         ).otherwise(F.col("new_community_id"))
     )
+    # TODO check common neighbor if found in shared_coms , last for loop of analysis method
 
     printTrace("new_community_edges NEW: ", new_community_edges)
 
@@ -508,7 +510,7 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
     #     shared_coms, on=["src", "dst"], how="left_anti"
     # ).withColumn("community_id", F.monotonically_increasing_id())
 
-def add_to_community_streaming(new_community_edges, communitiesDf, communityTagsDf, tags_column="tags"):
+def add_to_community_streaming(all_vertices:DataFrame, new_community_edges:DataFrame, communitiesDf:DataFrame, communityTagsDf:DataFrame):
     """
     Args:
         new_community_edges: DataFrame containing new community information with columns
@@ -520,14 +522,14 @@ def add_to_community_streaming(new_community_edges, communitiesDf, communityTags
         Updated communitiesDf and communityTagsDf as DataFrames
     """
     if new_community_edges.isEmpty():
-        return
+        return None, None, all_vertices
 
     # Step 1: Process and aggregate tags by new_community_id
     new_tags = (
         new_community_edges
-        .select("new_community_id", tags_column)
+        .select("new_community_id", "tags")
         .groupBy("new_community_id")
-        .agg(F.array_distinct(F.flatten(F.collect_list(tags_column))).alias("tags"))
+        .agg(F.array_distinct(F.flatten(F.collect_list("tags"))).alias("tags"))
     )
 
     printTrace("new_tags: ", new_tags)
@@ -535,8 +537,10 @@ def add_to_community_streaming(new_community_edges, communitiesDf, communityTags
     # Step 2: Process and aggregate community nodes (node_u, node_v, common_neighbor)
     new_communities = (
         new_community_edges
-        .select("new_community_id", "node_u", "node_v", "common_neighbor")
-        .withColumn("nodes", F.array_union(F.array("node_u", "node_v", "common_neighbor"), F.array()))
+        .select("new_community_id", "node_u", "node_v")
+        # .select("new_community_id", "node_u", "node_v", "common_neighbor")
+        .withColumn("nodes", F.array_union(F.array("node_u", "node_v"), F.array()))
+        # .withColumn("nodes", F.array_union(F.array("node_u", "node_v", "common_neighbor"), F.array()))
         .groupBy("new_community_id")
         .agg(F.array_distinct(F.flatten(F.collect_list("nodes"))).alias("nodes"))
     )
@@ -546,16 +550,91 @@ def add_to_community_streaming(new_community_edges, communitiesDf, communityTags
     printTrace("communityTagsDf: ", communityTagsDf)
 
     # Step 3: Combine and update communityTags and communities
-    updated_community_tags = communityTagsDf.join(new_tags, communityTagsDf.cid == new_tags.new_community_id, "outer") \
-        .select(new_tags.new_community_id, F.coalesce(new_tags.tags, communityTagsDf.tags).alias("tags"))
+    if communityTagsDf.isEmpty():
+        updated_community_tags = new_tags.withColumnRenamed("new_community_id", "cid")
+    else:
+        updated_community_tags = communityTagsDf.join(
+            new_tags,
+            communityTagsDf.cid == new_tags.new_community_id,
+            "outer"
+        ).select(
+            F.coalesce(new_tags.new_community_id, communityTagsDf.cid).alias("cid"),
+            F.coalesce(new_tags.tags, communityTagsDf.tags).alias("tags")
+        )
 
-    updated_communities = communitiesDf.join(new_communities, communitiesDf.cid == new_communities.new_community_id, "outer") \
-        .select(new_communities.new_community_id, F.coalesce(new_communities.nodes, communitiesDf.nodes).alias("nodes"))
+    if communitiesDf.isEmpty():
+        updated_communities = new_communities.withColumnRenamed("new_community_id", "cid")
+    else:
+        updated_communities = communitiesDf.join(
+            new_communities,
+            communitiesDf.cid == new_communities.new_community_id,
+            "outer"
+        ).select(
+            F.coalesce(new_communities.new_community_id, communitiesDf.cid).alias("cid"),
+            F.coalesce(new_communities.nodes, communitiesDf.nodes).alias("nodes")
+        )
+
+    community_nodes = new_community_edges.select(
+        F.explode(F.array("node_u", "node_v")).alias("id"),
+        F.col("new_community_id")
+    ).distinct().select(
+        F.col("id").cast("string"),
+        F.col("new_community_id").cast("string")
+    )
+
+
+    printTrace("community_nodes in add: ", community_nodes)
+    printTrace("all vertices in add: ", all_vertices)
+
+    print("allvertices debug")
+    # Assuming all_vertices has 'id' and 'c_coms', and community_nodes has 'id' and 'new_community_id'
+
+    all_vertices.alias("vertices").distinct().join(
+        community_nodes.alias("community"),
+        F.col("vertices.id") == F.col("community.id"),
+        "left"
+    ).select(
+        F.col("vertices.id").alias("id"),
+        F.when(
+            F.col("community.new_community_id").isNotNull(),
+            F.array_union(F.col("vertices.c_coms"), F.array(F.col("community.new_community_id"))).cast("STRING")
+        ).otherwise(F.col("vertices.c_coms").cast("STRING")).alias("c_coms")
+    ).show(truncate=False)
+
+    filtered_vertices = all_vertices.alias("vertices").join(
+        community_nodes.alias("community"),
+        F.col("vertices.id") == F.col("community.id"),
+        "inner"
+    ).select(
+        F.col("vertices.id").alias("id"),
+        F.col("vertices.c_coms").alias("c_coms"),
+        F.col("community.new_community_id")
+    )
+    printTrace("filtered_vertices in add: ", all_vertices)
+
+    updated_vertices = filtered_vertices.withColumn(
+        "c_coms",
+        F.array_union(F.col("c_coms"), F.array(F.col("community.new_community_id")))
+    ).select("id", "c_coms")
+    #
+    # # Step 5: Update c_coms for all_vertices
+    # updated_vertices = all_vertices.alias("vertices").join(
+    #     community_nodes.alias("community"),
+    #     F.col("vertices.id") == F.col("community.id"),
+    #     "left"
+    # ).withColumn(
+    #     "c_coms",
+    #     F.when(
+    #         F.col("community.new_community_id").isNotNull(),
+    #         F.array_union(F.col("vertices.c_coms"), F.array(F.col("community.new_community_id").cast("string")))
+    #     ).otherwise(F.col("vertices.c_coms"))
+    # ).select(F.col("vertices.id").alias("id"), F.col("c_coms"))
 
     printTrace("updated_community_tags: ", updated_community_tags)
     printTrace("updated_communities: ", updated_communities)
+    printTrace("updated_vertices: ", updated_vertices)
 
-    return updated_communities, updated_community_tags
+    return updated_community_tags, updated_communities, updated_vertices
 
 
 
