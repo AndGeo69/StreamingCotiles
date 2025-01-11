@@ -33,6 +33,20 @@ def common_neighbors_analysis(self, u, v, common_neighbors, tags):
                 for z in common_neighbors:
                     self.add_to_community(z, actual_cid, tags)
 
+def add_to_community(self, node, cid, tag):
+    flag = 1
+    for x in tag.split(','):
+        for tg in tag.split(','):
+            self.CommunityTags[cid].append(tg)
+        flag = 1
+        # print(self.CommunityTags[cid])
+
+    if flag == 1:
+        self.g.nodes[node]['c_coms'][cid] = None
+        if cid in self.communities:
+            self.communities[cid][node] = None
+        else:
+            self.communities[cid] = {node: None}
 
         # Check if the GraphFrame already exists (initialized in the driver)
         # if self.vertices is None or self.edges is None:
@@ -242,4 +256,63 @@ class TILES:
         # updated_edges.createOrReplaceTempView(self.edges_view)
 
 
+# def detect_common_neighbors2(self, edge_updates):
+#     """
+#     Detect common neighbors for edges in the batch using GraphFrames.
+#     Optimized to use a single DataFrame.
+#     """
+#
+#     # Step 1: Extract neighbors for each node in the graph
+#     edges = self.g.edges
+#     neighbors = (
+#         edges.select(F.col("src").alias("node"), F.col("dst").alias("neighbor"))
+#         .union(edges.select(F.col("dst").alias("node"), F.col("src").alias("neighbor")))
+#         .groupBy("node")
+#         .agg(F.collect_list("neighbor").alias("neighbors"))
+#     )
+#
+#     # Step 2 to Step 4: Combine edge_updates and neighbors and compute common neighbors in one DataFrame
+#     common_neighbors_filtered = (
+#         edge_updates
+#         .join(neighbors.withColumnRenamed("node", "src"), on="src", how="left")
+#         .withColumnRenamed("neighbors", "src_neighbors")
+#         .join(neighbors.withColumnRenamed("node", "dst"), on="dst", how="left")
+#         .withColumnRenamed("neighbors", "dst_neighbors")
+#         .withColumn("common_neighbors", F.array_intersect(F.col("src_neighbors"), F.col("dst_neighbors")))
+#         .filter(F.col("common_neighbors").isNotNull() & (F.size(F.col("common_neighbors")) > 0))
+#         .select("dst", "src", "timestamp", "tags", "weight", "common_neighbors")
+#     )
+#
+#     return common_neighbors_filtered
+        # updated_community_tags = communityTagsDf.alias("old").join(
+        #     new_tags.alias("new"),
+        #     F.col("old.cid") == F.col("new.cid"),
+        #     "outer"
+        # ).select(
+        #     F.coalesce(F.col("new.cid"), F.col("old.cid")).alias("cid"),
+        #     F.array_union(F.col("old.tags"), F.col("new.tags")).alias("tags")
+            # ,F.when(
+            #     F.col("old.tags").isNotNull() & F.col("new.tags").isNotNull(),
+            #     F.array_union(F.col("old.tags"), F.col("new.tags"))
+            # )
+            # .when(F.col("old.tags").isNotNull(), F.col("old.tags"))
+            # .otherwise(F.col("new.tags"))
+            # .alias("tags")
+        # )
+        # updated_community_tags = communityTagsDf.join(
+        #     new_tags,
+        #     F.col("communityTagsDf.cid") == F.col("new_tags.cid"),
+        #     "outer"
+        # ).select(
+        #     F.coalesce(F.col("new_tags.cid"), F.col("communityTagsDf.cid")).alias("cid"),
+        #     F.coalesce(F.col("new_tags.tags"), F.col("communityTagsDf.tags")).alias("tags")
+        # )
+
+# community_nodes = new_community_edges.select(
+#     F.explode(F.array("node_u", "node_v")).alias("id"),
+#     F.col("new_community_id")
+# ).distinct().select(
+#     F.col("id").cast("string"),
+#     F.col("new_community_id").cast("string")
+# )
 
