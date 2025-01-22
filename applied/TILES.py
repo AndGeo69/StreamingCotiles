@@ -182,7 +182,7 @@ class TILES:
                                              F.col("nodeV").alias("dst"),
                                              F.col("timestamp"),
                                              F.col("tags"),
-                                             F.lit(1).alias("weight"))
+                                             F.lit(1).alias("weight")).sort("timestamp")
 
         # Load previous state
         vertices_state, edges_state = loadStateVerticesAndEdges(self)
@@ -233,8 +233,6 @@ class TILES:
 
 
 def analyze_common_neighbors(self, common_neighbors: DataFrame, all_vertices: DataFrame) -> (DataFrame, DataFrame):
-    # Step 1: Join to fetch community info for `src` and `dst`
-
     if common_neighbors.isEmpty():
         return None, None
 
@@ -256,9 +254,72 @@ def analyze_common_neighbors(self, common_neighbors: DataFrame, all_vertices: Da
         .withColumn("shared_coms", F.array_intersect(F.col("src_coms"), F.col("dst_coms")))
         .withColumn("only_u", F.array_except(F.col("src_coms"), F.col("dst_coms")))
         .withColumn("only_v", F.array_except(F.col("dst_coms"), F.col("src_coms")))
+    ).sort("timestamp")
+
+    # Explode the common_neighbors column to get individual neighbors
+    exploded_neighbors = (
+        common_neighbors
+        .withColumn("neighbor", F.explode(F.col("common_neighbors")))
+        .join(all_vertices.alias("all_vertices"), F.col("neighbor") == F.col("all_vertices.id"), "left")
+        .withColumn("neighbor_communities", F.col("all_vertices.c_coms"))
     )
 
-    printTrace("common_neighbors NEW: ", common_neighbors)
+    # exploded_neighbor = (
+    #     exploded_neighbors
+    #     .withColumn("neighbor", F.explode(F.col("common_neighbors")))
+    #     .join(all_vertices.alias("all_vertices"), F.col("neighbor") == F.col("all_vertices.id"), "left")
+    #     .withColumn(
+    #         "neighbor_community",
+    #         F.when(
+    #             F.col("all_vertices.c_coms").isNotNull() & (F.size(F.col("all_vertices.c_coms")) > 0),
+    #             F.col("all_vertices.c_coms")
+    #         ).otherwise(F.array(F.lit(None)))  # Add a placeholder for empty arrays
+    #     )
+    #     .withColumn("neighbor_community", F.explode(F.col("neighbor_community")))
+    #     .withColumn("neighbor_community", F.when(F.col("neighbor_community").isNotNull(), F.col("neighbor_community")))
+    # )
+
+    exploded_neigh_communities = (
+        exploded_neighbors
+        .join(all_vertices.alias("all_nodes"), F.col("neighbor") == F.col("all_nodes.id"), "left")
+        .withColumn("neighbor_community", F.when(F.col("all_nodes.c_coms").isNotNull(), F.col("all_vertices.c_coms")).otherwise(F.array()))
+        .withColumn("neighbor_community", F.explode(F.col("neighbor_community")))
+    )
+
+    printTrace("exploded_neigh_communities", exploded_neigh_communities)
+        # .groupBy("node_u", "node_v", "common_neighbors", "src_coms", "dst_coms", "tags", "timestamp", "weight", "only_u", "only_v", "shared_coms")
+        # .agg(F.collect_list(F.col("all_vertices.c_coms")).alias("neighbors_communities"))
+
+    exploded_only_u_communities = exploded_neighbors.withColumn("only_u_exploded", F.explode(F.when(F.expr("only_u > 0"), F.col("only_u"))
+                                                                                            .otherwise(F.array())))
+    exploded_only_v_communities = exploded_neighbors.withColumn("only_v_exploded", F.explode(F.when(F.expr("only_v > 0"), F.col("only_v"))
+                                                                                            .otherwise(F.array())))
+    exploded_shared_coms_communities = exploded_neighbors.withColumn("shared_coms_exploded", F.explode(F.when(F.expr("shared_coms"), F.col("shared_coms"))
+                                                                                            .otherwise(F.array())))
+    printTrace("exploded_only_u_communities", exploded_only_u_communities)
+    printTrace("exploded_only_v_communities", exploded_only_v_communities)
+    printTrace("exploded_shared_coms_communities", exploded_shared_coms_communities)
+
+    # join common neigh communities with shared coms find anti join
+    if not exploded_shared_coms_communities.isEmpty():
+        shared_com_not_in_common_neigh_community = (
+            exploded_shared_coms_communities.join(exploded_neigh_communities,
+                                                  F.col("neighbor_community") == F.col("shared_coms_exploded"), how="left-anti")
+        )
+        printTrace("shared_com_not_in_common_neigh_community", shared_com_not_in_common_neigh_community)
+
+
+
+    # if (exploded_neigh_communities.isEmpty()): # no propagation - create new community and add the nodes
+
+
+    # # Fill nulls in neighbors_communities with an empty array
+    # common_neighbors = exploded_neighbors.withColumn(
+    #     "neighbors_communities",
+    #     F.when(F.col("neighbors_communities").isNull(), F.array()).otherwise(F.col("neighbors_communities"))
+    # )
+
+    printTrace("common_neighbors NEW: ", exploded_neighbor)
 
     # Explode common_neighbors
     common_neighbors = (
@@ -268,6 +329,8 @@ def analyze_common_neighbors(self, common_neighbors: DataFrame, all_vertices: Da
         # .withColumn("common_neighbor", F.explode(F.col("common_neighbors")))
     )
 
+
+
     # Add propagated column
     common_neighbors = (
         common_neighbors
@@ -276,7 +339,6 @@ def analyze_common_neighbors(self, common_neighbors: DataFrame, all_vertices: Da
             F.expr(
                 "size(array_intersect(only_v, src_coms)) > 0 OR "
                 "size(array_intersect(only_u, dst_coms)) > 0  "
-                # f"{F.size(F.array_intersect(F.coalesce(F.col('only_u'), F.array()), F.coalesce(F.col('dst_coms'), F.array()))) > 0}"
             )
         )
     )
@@ -311,15 +373,13 @@ def analyze_common_neighbors(self, common_neighbors: DataFrame, all_vertices: Da
         ).withColumn("new_community_id", F.expr("uuid()"))
     )
 
-    # .withColumn("new_community_id", F.monotonically_increasing_id())
-
     new_community_edges = new_community_edges.withColumn(
         "new_community_id",
         F.when(
             F.size(F.col("shared_coms")) > 0,
             F.first("new_community_id").over(Window.partitionBy("node_u", "node_v"))
         ).otherwise(F.col("new_community_id"))
-    )
+    ).sort("timestamp")
     # TODO check common neighbor if found in shared_coms , last for loop of analysis method
 
     printTrace("new_community_edges NEW: ", new_community_edges)
