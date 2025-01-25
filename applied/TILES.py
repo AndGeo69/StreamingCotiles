@@ -195,8 +195,17 @@ class TILES:
         # Update state
         updated_vertices = vertices_state.unionByName(new_nodes_filtered).dropDuplicates(subset=["id"])
         # updated_edges = edges_state.unionByName(updated_edges).dropDuplicates(subset=["src", "dst"])
-        updated_edges = updated_edges.unionByName(edges_state).dropDuplicates(subset=["src", "dst"])
-        printTrace("updated_edges", updated_edges)
+        printTrace("edges_state (before union)", edges_state)
+        printTrace("updated_edges (before union)", updated_edges)
+
+        # combined_edges = updated_edges.unionByName(edges_state)
+        # printTrace("combined_edges (after union, before deduplication)", combined_edges)
+        #
+        # deduplicated_edges = combined_edges.dropDuplicates(subset=["src", "dst"])
+        # printTrace("deduplicated_edges (after dropDuplicates)", deduplicated_edges)
+
+        # updated_edges = updated_edges.unionByName(edges_state).dropDuplicates(subset=["src", "dst"])
+        # printTrace("updated_edges (before save state)", updated_edges)
 
         # Persist updated state back to storage
         saveStateVerticesAndEdges(self, updated_vertices, updated_edges)
@@ -204,7 +213,11 @@ class TILES:
         # Reload updated state from Parquet to ensure it includes all persisted data
         all_vertices, all_edges = loadStateVerticesAndEdges(self)
 
-        # printTrace("new edges: ", new_edges)
+
+        printTrace("new edges: (before evo)", new_edges)
+        printTrace("updated_edges: (before evo)", updated_edges)
+        printTrace("all edges: (before evo)", all_edges)
+
         common_neighbors = evolution(all_edges, new_edges)
         printTrace("Common_neighbors: ", common_neighbors)
         # common_neighbors = detect_common_neighbors(all_edges, new_edges)
@@ -1033,7 +1046,7 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
         normalized_all_edges,
         on=["src", "dst"],
         how="left_anti"  # Keep only rows in `new_edges` that are NOT in `all_edges`
-    )
+    ).sort("timestamp")
     printTrace("first_edges", first_edges)
 
     # new edges that exist already in the all_edges state AKA has_edge == true
@@ -1044,11 +1057,13 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
     # )
     # printTrace("preexisting_edges", preexisting_edges)
 
-    first_edges_deduplicated = first_edges.groupBy("src", "dst").agg(
+    first_edges_deduplicated = (first_edges.groupBy("src", "dst").agg(
         F.first("timestamp").alias("timestamp"),
         F.first("tags").alias("tags"),
         F.first("weight").alias("weight")
-    ).sort("timestamp")
+    )
+                                # .withColumn("shouldAnalyze", F.lit(True))
+    .sort("timestamp"))
     printTrace("first_edges_deduplicated", first_edges_deduplicated)
 
     # Step 1: Identify preexisting edges and count their occurrences in `normalized_new_edges`
@@ -1064,7 +1079,7 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
     preexisting_edges_updates = normalized_new_edges_renamed.join(
         normalized_all_edges_renamed,
         on=["src", "dst"],
-        how="left" if normalized_all_edges_renamed.isEmpty() else "inner" # Only keep edges that exist in both DataFrames or else the new_edges (first batch)
+        how="left" if normalized_all_edges_renamed.isEmpty() else "inner"  # Only keep edges that exist in both DataFrames or else the new_edges (first batch)
     ).groupBy("src", "dst").agg(
         F.count("*").alias("count_occurrences"),  # Count how many times the edge appears in `normalized_new_edges`
         F.sum("new_weight").alias("total_weight_increment"),  # Sum up the weights of the new occurrences
@@ -1078,18 +1093,26 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
     printTrace("preexisting_edges_updates", preexisting_edges_updates)
 
     # Step 2: Update preexisting edges
-    updated_preexisting_edges = preexisting_edges_updates.join(
+    updated_preexisting_edges = (preexisting_edges_updates.join(
         normalized_all_edges,
         on=["src", "dst"],
         how="left"
     ).withColumn("weight", F.coalesce(F.col("weight"), F.lit(0)) + F.coalesce(F.col("total_weight_increment"), F.lit(0))  # Handle NULL weights
     ).withColumn("tags", F.coalesce(F.col("latest_tags"), F.col("tags"))  # Replace tags with the latest ones
     ).withColumn("timestamp", F.coalesce(F.col("latest_timestamp"), F.col("timestamp"))  # Update the timestamp if needed
-    ).drop("count_occurrences", "total_weight_increment", "latest_timestamp", "latest_tags")
+    # ).withColumn("shouldAnalyze", F.lit(False)  # Preexisting edges should not be analyzed again
+    ).drop("count_occurrences", "total_weight_increment", "latest_timestamp", "latest_tags"))
 
     printTrace("updated_preexisting_edges", updated_preexisting_edges)
 
     final_edges = updated_preexisting_edges.unionByName(first_edges_deduplicated).dropDuplicates(["src", "dst"])
+    # final_edges = (
+    #     updated_preexisting_edges.unionByName(first_edges_deduplicated)
+    #     .withColumn("priority", F.when(F.col("shouldAnalyze"), F.lit(1)).otherwise(F.lit(0)))
+    #     .withColumn("row_number", F.row_number().over(Window.partitionBy("src", "dst").orderBy(F.desc("priority"))))
+    #     .filter(F.col("row_number") == 1)  # Keep only the highest priority row per src-dst pair
+    #     .drop("priority", "row_number")  # Remove helper columns
+    # )
 
     printTrace("final_edges:", final_edges)
 
