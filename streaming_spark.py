@@ -25,6 +25,9 @@ def create_streaming_session():
                      .getOrCreate())
             spark.conf.set("spark.streaming.backpressure.enabled", "true")
 
+            spark.sparkContext.setCheckpointDir("/home/bigdata/PycharmProjects/SparkStreamingCotiles/checkpoint")
+            # spark.sparkContext.setLogLevel("TRACE")
+
             # Enabled by properties file located in /home/bigdata/spark/conf    spark-defaults.cond
             streamingDataFrame = spark.readStream.format('socket').option('host', 'localhost').option('port', '9999').load()
             streamingDF = (streamingDataFrame.selectExpr(
@@ -48,9 +51,11 @@ def create_streaming_session():
 
             print("streamingDF IsStreaming: " + streamingDF.isStreaming.__str__())
 
+            tiles_instance.clear_directory(directory_path="/home/bigdata/PycharmProjects/SparkStreamingCotiles/checkpoint")
             # In the writeStream:
             (streamingDF.writeStream.foreachBatch(tiles_instance.execute)
                         .outputMode("append")
+                        .option("checkpointLocation", "/home/bigdata/PycharmProjects/SparkStreamingCotiles/checkpoint")
                         .trigger(processingTime="5 seconds")
                         .start()
                         .awaitTermination())
