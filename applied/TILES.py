@@ -187,10 +187,7 @@ class TILES:
         # Load previous state
         vertices_state, edges_state = loadStateVerticesAndEdges(self)
 
-        # vertices_state.cache()
-        # edges_state.cache()
-
-        updated_edges, firstTimeEdges = update_graph_with_edges(edges_state, new_edges)
+        updated_edges = update_graph_with_edges(edges_state, new_edges)
 
         new_nodes_filtered = new_nodes.join(vertices_state.select("id"), on="id", how="left_anti")
 
@@ -208,23 +205,59 @@ class TILES:
 
         printTrace("updated_vertices (before save)", updated_vertices)
         printTrace("updated_edges (before save)", updated_edges)
-        printTrace("firstTimeEdges (before save)", firstTimeEdges)
+        # printTrace("firstTimeEdges (before save)", firstTimeEdges)
         # Persist updated state back to storage
-        saveStateVerticesAndEdges(self, updated_vertices, updated_edges)
-        printTrace("updated_vertices (after save)", updated_vertices)
-        printTrace("updated_edges (after save)", updated_edges)
-        printTrace("firstTimeEdges (after save)", firstTimeEdges)
+
+        # saveStateVerticesAndEdges(self, updated_vertices, updated_edges)
+
+        # printTrace("updated_vertices (after save)", updated_vertices)
+        # printTrace("updated_edges (after save)", updated_edges)
+
+        # Detect edges that are getting processed for the first time
+        # Only those edges are getting neighbor analyzed
+        normalized_new_edges = normalize_edges(new_edges)
+        normalized_all_edges = normalize_edges(edges_state)
+        printTrace("normalized_new_edges", normalized_new_edges)
+        printTrace("normalized_all_edges", normalized_all_edges)
+        first_edges = normalized_new_edges.join(
+            normalized_all_edges,
+            on=["src", "dst"],
+            how="left_anti"
+        ).sort("timestamp")
+        # printTrace("first_edges", first_edges)
+        firstTimeEdges = (first_edges.groupBy("src", "dst").agg(
+            F.first("timestamp").alias("timestamp"),
+            F.first("tags").alias("tags"),
+            # F.sum("weight").alias("weight")
+            F.first("weight").alias("weight")
+        ).sort("timestamp"))
+        # printTrace("firstTimeEdges (after save)", firstTimeEdges)
 
         # Reload updated state from Parquet to ensure it includes all persisted data
         # all_vertices, all_edges = loadStateVerticesAndEdges(self)
+
+        all_vertices, all_edges = updated_vertices, updated_edges
+
         # printTrace("new edges: (before evo)", new_edges)
         # printTrace("updated_edges: (before evo)", updated_edges)
-        # printTrace("all edges: (before evo)", all_edges)
-        # printTrace("all edges: (before evo)", updated_edges)
+        printTrace("all all_edges: (before evo)", all_edges)
+        printTrace("firstTimeEdges: ", firstTimeEdges)
 
-        # common_neighbors = evolution(all_edges, updated_edges)
-        # common_neighbors = evolution(all_edges, new_edges)
-        # printTrace("Common_neighbors: ", common_neighbors)
+        # common_neighbors = common_neighbor_detection(updated_edges, firstTimeEdges)
+        common_neighbors = common_neighbor_detection(all_edges, firstTimeEdges)
+        printTrace("Common_neighbors: ", common_neighbors)
+        print(f"all_vertices count BEFORE saving/loading: {all_vertices.count()}")
+        print(f"all_edges count BEFORE saving/loading: {all_edges.count()}")
+
+        saveStateVerticesAndEdges(self, updated_vertices, updated_edges)
+        all_vertices, all_edges = loadStateVerticesAndEdges(self)
+        printTrace("all_vertices AFTER neighbors detection loaded", all_vertices)
+        print(f"all_vertices count after saving/loading: {all_vertices.count()}")
+        print(f"all_edges count after saving/loading: {all_edges.count()}")
+        printTrace("all_edges AFTER neighbors detection loaded: ", all_edges)
+        printTrace("Common_neighbors AFTER Saving/Loading ", common_neighbors)
+
+
         # common_neighbors = detect_common_neighbors(all_edges, new_edges)
         # printMsg(" After detect_common_neighbors")
         # printTrace("Common Neighbors:", common_neighbors)
@@ -233,7 +266,11 @@ class TILES:
 
         propagated_edges, new_community_edges = None, None
 
-        # propagated_edges, new_community_edges = analyze_common_neighbors(self, common_neighbors, all_vertices)
+        propagated_edges, new_community_edges = analyze_common_neighbors(self, common_neighbors, all_vertices)
+
+        printTrace("propagated_edges", propagated_edges)
+        printTrace("new_community_edges", new_community_edges)
+
 
         # if new_community_edges is not None:
         #     communitiesDf = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
@@ -253,6 +290,11 @@ class TILES:
 
 
 def analyze_common_neighbors(self, common_neighbors: DataFrame, all_vertices: DataFrame) -> (DataFrame, DataFrame):
+    if common_neighbors.isEmpty():
+        return None, None
+
+    common_neighbors = common_neighbors.filter(F.expr("size(common_neighbors) > 0"))
+
     if common_neighbors.isEmpty():
         return None, None
 
@@ -921,7 +963,7 @@ def printMsg(msg):
 #     return common_neighbors
 
 
-def evolution(all_edges: DataFrame, edge_updates: DataFrame):
+def common_neighbor_detection(all_edges: DataFrame, edge_updates: DataFrame):
     # Extract neighbors for both source (u) and destination (v)
     neighbors = all_edges.select(
         F.col("src").alias("node"),
@@ -933,12 +975,18 @@ def evolution(all_edges: DataFrame, edge_updates: DataFrame):
         )
     ).distinct()
 
+    # printTrace("neighbors", neighbors)
+    # printTrace("edge_updates (common neigh det)", edge_updates)
+
     # Calculate neighbor counts for all nodes
     neighbor_counts = neighbors.groupBy("node").agg(F.count("neighbor").alias("neighbor_count"))
+
+    # printTrace("neighbor_counts", neighbor_counts)
 
     # Filter for nodes with more than one neighbor (u_n and v_n conditions)
     valid_neighbors = neighbor_counts.filter(F.expr("neighbor_count > 1")).select("node")
                                             # F.col("neighbor_count") > 1
+    # printTrace("valid_neighbors", valid_neighbors)
 
     # Join edges with valid nodes to ensure u and v both meet the condition
     valid_edges = (
@@ -964,6 +1012,7 @@ def evolution(all_edges: DataFrame, edge_updates: DataFrame):
         .groupBy("node_u", "node_v", "tags", "timestamp", "weight")
         .agg(F.collect_set("common_neighbor").alias("common_neighbors"))
     )
+    # printTrace("common_neighbors(inside)", common_neighbors)
 
     return common_neighbors.sort("timestamp")
 
@@ -1042,39 +1091,39 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
     # printTrace("new_edges (with key): ", new_edges)
 
     normalized_new_edges = normalize_edges(new_edges)
-    printTrace("normalized_new_edges: ", normalized_new_edges)
+    # printTrace("normalized_new_edges: ", normalized_new_edges)
 
     normalized_all_edges = normalize_edges(all_edges)
-    printTrace("normalized_all_edges: ", normalized_all_edges)
+    # printTrace("normalized_all_edges: ", normalized_all_edges)
 
-    first_edges = normalized_new_edges.join(
-        normalized_all_edges,
-        on=["src", "dst"],
-        how="left_anti"  # Keep only rows in `new_edges` that are NOT in `all_edges`
-    ).sort("timestamp")
-    printTrace("first_edges", first_edges)
-
-    first_edges_deduplicated = (first_edges.groupBy("src", "dst").agg(
-        F.first("timestamp").alias("timestamp"),
-        F.first("tags").alias("tags"),
-        # F.sum("weight").alias("weight")
-        F.first("weight").alias("weight")
-    )
-    .sort("timestamp"))
-    printTrace("first_edges_deduplicated", first_edges_deduplicated) # Send them for neighbor analysis
+    # first_edges = normalized_new_edges.join(
+    #     normalized_all_edges,
+    #     on=["src", "dst"],
+    #     how="left_anti"  # Keep only rows in `new_edges` that are NOT in `all_edges`
+    # ).sort("timestamp")
+    # printTrace("first_edges", first_edges)
+    #
+    # first_edges_deduplicated = (first_edges.groupBy("src", "dst").agg(
+    #     F.first("timestamp").alias("timestamp"),
+    #     F.first("tags").alias("tags"),
+    #     # F.sum("weight").alias("weight")
+    #     F.first("weight").alias("weight")
+    # )
+    # .sort("timestamp"))
+    # printTrace("first_edges_deduplicated", first_edges_deduplicated) # Send them for neighbor analysis
 
     # Step 1: Identify preexisting edges and count their occurrences in `normalized_new_edges`
     normalized_new_edges_renamed = (normalized_new_edges.withColumnRenamed("weight", "new_weight")
                                     .withColumnRenamed("timestamp", "new_timestamp")
                                     .withColumnRenamed("tags", "new_tags")
                                     )
-    normalized_all_edges_renamed = (normalized_all_edges.withColumnRenamed("weight", "existing_weight")
-                                    .withColumnRenamed("timestamp", "existing_timestamp")
-                                    .withColumnRenamed("tags", "existing_tags")
-                                    )
+    # normalized_all_edges_renamed = (normalized_all_edges.withColumnRenamed("weight", "existing_weight")
+    #                                 .withColumnRenamed("timestamp", "existing_timestamp")
+    #                                 .withColumnRenamed("tags", "existing_tags")
+    #                                 )
 
-    printTrace("normalized_new_edges_renamed", normalized_new_edges_renamed)
-    printTrace("normalized_all_edges_renamed", normalized_all_edges_renamed)
+    # printTrace("normalized_new_edges_renamed", normalized_new_edges_renamed)
+    # printTrace("normalized_all_edges_renamed", normalized_all_edges_renamed)
 
 
     new_edges_grouped = normalized_new_edges_renamed.groupBy("src", "dst").agg(
@@ -1085,7 +1134,7 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
         F.col("latest_entry.new_tags").alias("latest_tags")
     )
 
-    printTrace("new_edges_grouped", new_edges_grouped)
+    # printTrace("new_edges_grouped", new_edges_grouped)
 
     if (new_edges_grouped.isEmpty()):
         updated_preexisting_edges = normalized_all_edges
@@ -1099,15 +1148,16 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
             .drop("new_occurrences", "latest_timestamp", "latest_tags")
         )
 
-    printTrace("updated_preexisting_edges", updated_preexisting_edges)
+    # printTrace("updated_preexisting_edges", updated_preexisting_edges)
 
-    totalEdges = updated_preexisting_edges.unionByName(first_edges_deduplicated).dropDuplicates(["src", "dst"]).sort("timestamp")
+    # totalEdges = updated_preexisting_edges.unionByName(first_edges_deduplicated).dropDuplicates(["src", "dst"]).sort("timestamp")
 
+    totalEdges = updated_preexisting_edges.unionByName(normalized_all_edges).dropDuplicates(["src", "dst"]).sort("timestamp")
     # totalEdges = totalEdges.unionByName(normalized_all_edges).dropDuplicates(["src", "dst"]).sort("timestamp")
 
-    printTrace("totalEdges:", totalEdges)
+    # printTrace("totalEdges:", totalEdges)
 
-    return totalEdges, first_edges_deduplicated
+    return totalEdges
 
 def saveStateVerticesAndEdges(self, vertices: DataFrame = None, edges: DataFrame = None):
     """
