@@ -39,8 +39,6 @@ def add_to_community(self, node, cid, tag):
         for tg in tag.split(','):
             self.CommunityTags[cid].append(tg)
         flag = 1
-        # print(self.CommunityTags[cid])
-
     if flag == 1:
         self.g.nodes[node]['c_coms'][cid] = None
         if cid in self.communities:
@@ -315,4 +313,122 @@ class TILES:
 #     F.col("id").cast("string"),
 #     F.col("new_community_id").cast("string")
 # )
+
+
+    #TODO CHECK THIS IF NEEDED
+    # when saving into parquet, due to action, the following sum results to wrong weight calculation
+    # see if i can just use normalized_new_edges_renamed and normalized_all_edges_renamed only.
+    # preexisting_edges_updates = normalized_new_edges_renamed.join(
+    #     normalized_all_edges_renamed,
+    #     on=["src", "dst"],
+    #     how="left" if normalized_all_edges_renamed.isEmpty() else "inner"  # Only keep edges that exist in both DataFrames or else the new_edges (first batch)
+    # ).groupBy("src", "dst").agg(
+    #     F.sum("new_weight").alias("total_weight_increment"),  # Sum up the weights of the new occurrences
+    #     F.max(F.struct("new_timestamp", "new_tags")).alias("latest_entry")  # Get the latest entry (timestamp and tags)
+    # ).select(
+    #     "src", "dst",  "total_weight_increment",
+    #     F.col("latest_entry.new_timestamp").alias("latest_timestamp"),
+    #     F.col("latest_entry.new_tags").alias("latest_tags")
+    # )
+
+
+        # updated_preexisting_edges = normalized_all_edges.join(
+        #     normalized_new_edges.withColumnRenamed("weight", "new_weight")
+        #     .withColumnRenamed("timestamp", "new_timestamp")
+        #     .withColumnRenamed("tags", "new_tags"),
+        #     on=["src", "dst"],
+        #     how="left"
+        # ).withColumn("weight", F.coalesce(F.col("weight"), F.lit(0)) + F.coalesce(F.col("new_weight"), F.lit(0))
+        # ).withColumn("tags", F.coalesce(F.col("new_tags"), F.col("tags"))
+        # ).withColumn("timestamp", F.coalesce(F.col("new_timestamp"), F.col("timestamp"))
+        # ).drop("new_weight", "new_timestamp", "new_tags")
+
+        # # Step 2: Update preexisting edges
+        # updated_preexisting_edges = (preexisting_edges_updates.join(
+        #     normalized_all_edges,
+        #     on=["src", "dst"],
+        #     how="left"
+        # ).withColumn("weight", F.coalesce(F.col("weight"), F.lit(0)) + F.coalesce(F.col("total_weight_increment"), F.lit(0))  # Handle NULL weights
+        # ).withColumn("tags", F.coalesce(F.col("latest_tags"), F.col("tags"))  # Replace tags with the latest ones
+        # ).withColumn("timestamp", F.coalesce(F.col("latest_timestamp"), F.col("timestamp"))  # Update the timestamp if needed
+        # ).drop("total_weight_increment", "latest_timestamp", "latest_tags"))
+
+# check these files only 2 communities detected somethings very wrong
+# communitiesDf1 = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
+# communityTagsDf1 = loadState(self=self, pathToload=self.communityTags_path,
+#                             schemaToCreate=self.communityTags_schema)
+# updated_community_tags1, updated_communities1, updated_vertices1 = (add_to_community_streaming(self, all_vertices, shared_com_not_in_common_neigh_community, communitiesDf1, communityTagsDf1))
+# print("Following 3 DFs after shared_com_not_in_common_neigh_community was added")
+# printTrace("updated_community_tags:", updated_community_tags1)
+# printTrace("updated_communities:", updated_communities1)
+# printTrace("updated_vertices:", updated_vertices1)
+#
+# saveState(updated_community_tags1, self.communityTags_path)
+# saveState(updated_communities1, self.communities_path)
+# saveState(updated_vertices1, self.vertices_path)
+
+        # printTrace("new_community_edges in if: ", new_community_edges)
+        # communitiesDf2 = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
+        # communityTagsDf2 = loadState(self=self, pathToload=self.communityTags_path,
+        #                             schemaToCreate=self.communityTags_schema)
+
+        # updated_community_tags2, updated_communities2, updated_vertices2 = (add_to_community_streaming(self, all_vertices, new_community_edges, communitiesDf2, communityTagsDf2))
+
+        # print("Following 3 DFs after new_community_edges was added")
+        # printTrace("updated_community_tags:", updated_community_tags2)
+        # printTrace("updated_communities:", updated_communities2)
+        # printTrace("updated_vertices:", updated_vertices2)
+        #
+        # saveState(updated_community_tags2, self.communityTags_path)
+        # saveState(updated_communities2, self.communities_path)
+        # saveState(updated_vertices2, self.vertices_path)
+
+    # communitiesDf3 = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
+    # communityTagsDf3 = loadState(self=self, pathToload=self.communityTags_path,
+    #                             schemaToCreate=self.communityTags_schema)
+
+    # updated_community_tags3, updated_communities3, updated_vertices3 = (add_to_community_streaming(self, all_vertices, only_u_coms_with_neigh_coms, communitiesDf3, communityTagsDf3))
+
+
+    # print("Following 3 DFs after only_u_coms_with_neigh_coms was added")
+    # printTrace("updated_community_tags:", updated_community_tags3)
+    # printTrace("updated_communities:", updated_communities3)
+    # printTrace("updated_vertices:", updated_vertices3)
+    #
+    # saveState(updated_community_tags3, self.communityTags_path)
+    # saveState(updated_communities3, self.communities_path)
+    # saveState(updated_vertices3, self.vertices_path)
+
+        # should add the shared coms id to the common neighbor of above df
+
+    # join exploded_only_u_communities with exploded_shared_coms_communities - add the u node
+    # join exploded_only_v_communities with exploded_shared_coms_communities - add the v node
+
+    # perhaps add to communities inside this method instead of returning dfs and passing them into different method
+    # if added inside this method i have to keep updated the state of required dfs
+
+
+# check only_u and only_v columns of both dfs something's sus there
+# need to add also only_v-related df
+# check if i ADD the correct edges, for only_u i should add the common_neighbors community it to V edge !! and vice versa for only_v -> u
+
+# something is wrong with saving the comTags and communities
+
+
+# communitiesDf4 = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
+    # communityTagsDf4 = loadState(self=self, pathToload=self.communityTags_path,
+    #                             schemaToCreate=self.communityTags_schema)
+
+    # updated_community_tags4, updated_communities4, updated_vertices4 = (add_to_community_streaming(self, all_vertices, only_v_coms_with_neigh_coms, communitiesDf4, communityTagsDf4))
+
+    # print("Following 3 DFs after only_v_coms_with_neigh_coms was added")
+    # printTrace("updated_community_tags:", updated_community_tags4)
+    # printTrace("updated_communities:", updated_communities4)
+    # printTrace("updated_vertices:", updated_vertices4)
+    #
+    # saveState(updated_community_tags4, self.communityTags_path)
+    # saveState(updated_communities4, self.communities_path)
+    # saveState(updated_vertices4, self.vertices_path)
+
+
 
