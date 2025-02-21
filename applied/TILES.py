@@ -163,14 +163,16 @@ class TILES:
                 # print("~~ do something now that a slice is detected\n")
 
 
-
-        to_remove_df = theDataframe.filter(F.col("action") == "-")
         # 1 TODO remove_edge
-        # remove_edge_from_graph(self.g, to_remove_df)
-        remove_edge(self, to_remove_df)
+        to_remove_df = batch_df.filter(F.col("action") == "-").select(F.col("nodeU").alias("src"),
+                                                                      F.col("nodeV").alias("dst"),
+                                                                      F.col("timestamp"),
+                                                                      F.col("tags"),
+                                                                      F.lit(1).alias("weight")).sort("timestamp")
+        remove_edge(self, to_remove_df.filter(F.col("nodeU") != F.col("nodeV")))
 
         # Filter valid edges
-        theDataframe = batch_df.filter(F.col("nodeU") != F.col("nodeV"))
+        theDataframe = batch_df.filter(F.col("action") == "+").filter(F.col("nodeU") != F.col("nodeV"))
 
         new_nodes = (
             theDataframe.select(F.col("nodeU").alias("id"))
@@ -268,7 +270,8 @@ class TILES:
         propagated_edges, new_community_edges = None, None
 
         # propagated_edges, new_community_edges = analyze_common_neighbors(self, common_neighbors, all_vertices)
-        exploded_only_u_communities, exploded_only_v_communities, exploded_shared_coms_communities, exploded_neighbors = analyze_common_neighbors(self, common_neighbors, all_vertices)
+        (exploded_only_u_communities, exploded_only_v_communities,
+                exploded_shared_coms_communities, exploded_neighbors) = analyze_common_neighbors(self, common_neighbors, all_vertices)
 
         add_community_neighbors(self, exploded_neighbors, exploded_only_u_communities, exploded_only_v_communities,
                                 exploded_shared_coms_communities, all_vertices)
@@ -310,84 +313,19 @@ def add_community_neighbors(self, exploded_neighbors: DataFrame, exploded_only_u
         .withColumn("neighbor_community", F.explode(F.col("neighbor_community")))   # -> skip null rows
     )
 
-    # join common neigh communities with shared coms find anti join
-    if not exploded_shared_coms_communities.isEmpty():
-        shared_com_not_in_common_neigh_community = (
-            exploded_shared_coms_communities.join(exploded_neigh_communities,
-                                                  F.col("neighbor_community") == F.col("shared_coms_exploded"), how="left_anti")
-        ).withColumnRenamed("neighbor_community", "new_community_id")
+    only_v_coms_with_neigh_coms = ((exploded_only_v_communities.alias("only_v_coms")
+            .join(exploded_neigh_communities.alias("neigh_coms"), F.col("neighbor_community") == F.col("only_v_exploded"), how="left_outer"))
+            .select(F.col("neigh_coms.node_u").cast("string"), F.col("neigh_coms.node_v").cast("string"),
+                        F.col("neigh_coms.common_neighbors"), F.col("neigh_coms.tags"), F.col("neigh_coms.timestamp"), F.col("neigh_coms.weight"),
+                        F.col("neigh_coms.shared_coms"), F.col("neigh_coms.only_u"), F.col("neigh_coms.only_v"),
+                        F.col("neigh_coms.neighbor_communities"), F.col("neigh_coms.neighbor_community")
+    ).distinct())
+    only_v_coms_with_neigh_coms = only_v_coms_with_neigh_coms.withColumnRenamed("neighbor_community", "new_community_id").withColumn("nodes", F.array("node_u"))
 
-        shared_com_not_in_common_neigh_community = shared_com_not_in_common_neigh_community.withColumn("nodes", F.array("neighbor"))
-        printTrace("shared_com_not_in_common_neigh_community", shared_com_not_in_common_neigh_community)
+    printTrace("only_v_coms_with_neigh_coms", only_v_coms_with_neigh_coms)
 
-        # check these files only 2 communities detected somethings very wrong
-        communitiesDf1 = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
-        communityTagsDf1 = loadState(self=self, pathToload=self.communityTags_path,
-                                    schemaToCreate=self.communityTags_schema)
+    add_to_community_streaming(self, all_vertices, only_v_coms_with_neigh_coms)
 
-        updated_community_tags1, updated_communities1, updated_vertices1 = (
-            add_to_community_streaming(all_vertices, shared_com_not_in_common_neigh_community, communitiesDf1, communityTagsDf1))
-
-        print("Following 3 DFs after shared_com_not_in_common_neigh_community was added")
-        printTrace("updated_community_tags:", updated_community_tags1)
-        printTrace("updated_communities:", updated_communities1)
-        printTrace("updated_vertices:", updated_vertices1)
-
-        saveState(updated_community_tags1, self.communityTags_path)
-        saveState(updated_communities1, self.communities_path)
-        saveState(updated_vertices1, self.vertices_path)
-
-        # should add the shared coms id to the common neighbor of above df
-
-    # join exploded_only_u_communities with exploded_shared_coms_communities - add the u node
-    # join exploded_only_v_communities with exploded_shared_coms_communities - add the v node
-
-    # perhaps add to communities inside this method instead of returning dfs and passing them into different method
-    # if added inside this method i have to keep updated the state of required dfs
-
-
-    if exploded_neigh_communities.isEmpty(): # no propagation - create new community and add the nodes
-        printMsg("exploded_neigh_communities is empty thus create new community and add the nodes")
-        new_community_edges = (exploded_neighbors
-        .select(
-            F.col("node_u").cast("string"), F.col("node_v").cast("string"),
-            F.col("common_neighbors"),
-            F.col("tags"), F.col("timestamp"), F.col("weight"),
-            F.col("shared_coms"), F.col("only_u"), F.col("only_v"))
-        .withColumn("new_community_id", F.expr("uuid()")))
-
-        new_community_edges = new_community_edges.withColumn(
-            "new_community_id",
-            F.when(
-                F.expr("size(shared_coms) > 0"),
-                F.first("new_community_id").over(Window.partitionBy("node_u", "node_v"))
-            ).otherwise(F.col("new_community_id"))
-        ).sort("timestamp")
-
-        # printTrace("new_community_edges in if: ", new_community_edges)
-        communitiesDf2 = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
-        communityTagsDf2 = loadState(self=self, pathToload=self.communityTags_path,
-                                    schemaToCreate=self.communityTags_schema)
-
-        updated_community_tags2, updated_communities2, updated_vertices2 = (
-            add_to_community_streaming(all_vertices, new_community_edges, communitiesDf2, communityTagsDf2))
-
-        print("Following 3 DFs after new_community_edges was added")
-        printTrace("updated_community_tags:", updated_community_tags2)
-        printTrace("updated_communities:", updated_communities2)
-        printTrace("updated_vertices:", updated_vertices2)
-
-        saveState(updated_community_tags2, self.communityTags_path)
-        saveState(updated_communities2, self.communities_path)
-        saveState(updated_vertices2, self.vertices_path)
-        return
-
-    else:
-        print("Place holder for exploded_neigh_communities is NOT empty, reprinting it and return")
-        # printTrace("exploded_neigh_communities", exploded_neigh_communities)
-
-    # if not exploded_only_u_communities.isEmpty():
-    # if exploded_only_u_communities.
     only_u_coms_with_neigh_coms = ((exploded_only_u_communities.alias("only_u_coms")
              .join(exploded_neigh_communities.alias("neigh_coms"),
                 F.col("neighbor_community") == F.col("only_u_exploded"), how="left_outer"))
@@ -397,62 +335,108 @@ def add_community_neighbors(self, exploded_neighbors: DataFrame, exploded_only_u
                     F.col("neigh_coms.neighbor_communities"), F.col("neigh_coms.neighbor_community")
             ).distinct())
 
-    only_u_coms_with_neigh_coms = only_u_coms_with_neigh_coms.withColumnRenamed("neighbor_community", "new_community_id")
-    only_u_coms_with_neigh_coms = only_u_coms_with_neigh_coms.withColumn("nodes", F.array("node_v"))
+    only_u_coms_with_neigh_coms = only_u_coms_with_neigh_coms.withColumnRenamed("neighbor_community", "new_community_id").withColumn("nodes", F.array("node_v"))
 
     printTrace("only_u_coms_with_neigh_coms", only_u_coms_with_neigh_coms)
 
-    only_v_coms_with_neigh_coms = ((exploded_only_v_communities.alias("only_v_coms")
-            .join(exploded_neigh_communities.alias("neigh_coms"), F.col("neighbor_community") == F.col("only_v_exploded"), how="left_outer"))
-            .select(F.col("neigh_coms.node_u").cast("string"), F.col("neigh_coms.node_v").cast("string"),
-                        F.col("neigh_coms.common_neighbors"), F.col("neigh_coms.tags"), F.col("neigh_coms.timestamp"), F.col("neigh_coms.weight"),
-                        F.col("neigh_coms.shared_coms"), F.col("neigh_coms.only_u"), F.col("neigh_coms.only_v"),
-                        F.col("neigh_coms.neighbor_communities"), F.col("neigh_coms.neighbor_community")
-    ).distinct())
-    only_v_coms_with_neigh_coms = only_v_coms_with_neigh_coms.withColumnRenamed("neighbor_community", "new_community_id")
-    only_v_coms_with_neigh_coms = only_v_coms_with_neigh_coms.withColumn("nodes", F.array("node_u"))
+    add_to_community_streaming(self, all_vertices, only_u_coms_with_neigh_coms)
 
-    printTrace("only_v_coms_with_neigh_coms", only_v_coms_with_neigh_coms)
+    # if not exploded_shared_coms_communities.isEmpty():
+    shared_com_not_in_common_neigh_community = (
+        exploded_shared_coms_communities.join(exploded_neigh_communities,
+                                              F.col("neighbor_community") == F.col("shared_coms_exploded"), how="left_anti")
+    ).withColumnRenamed("neighbor_community", "new_community_id")
 
-    # check only_u and only_v columns of both dfs something's sus there
-    # need to add also only_v-related df
-    # check if i ADD the correct edges, for only_u i should add the common_neighbors community it to V edge !! and vice versa for only_v -> u
+    shared_com_not_in_common_neigh_community = shared_com_not_in_common_neigh_community.withColumn("nodes", F.array("neighbor"))
+    printTrace("shared_com_not_in_common_neigh_community", shared_com_not_in_common_neigh_community)
 
-    ### ONLY U ####
-    communitiesDf3 = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
-    communityTagsDf3 = loadState(self=self, pathToload=self.communityTags_path,
-                                schemaToCreate=self.communityTags_schema)
+    add_to_community_streaming(self, all_vertices, shared_com_not_in_common_neigh_community)
 
-    updated_community_tags3, updated_communities3, updated_vertices3 = (
-        add_to_community_streaming(all_vertices, only_u_coms_with_neigh_coms, communitiesDf3, communityTagsDf3))
+    if exploded_neigh_communities.isEmpty() or (only_v_coms_with_neigh_coms.isEmpty() and only_u_coms_with_neigh_coms.isEmpty() and
+                                                (shared_com_not_in_common_neigh_community is not None and shared_com_not_in_common_neigh_community.isEmpty())):
+        printMsg("exploded_neigh_communities is empty thus create new community and add the nodes")
+        new_community_edges = (exploded_neighbors
+                               .select(
+            F.col("node_u").cast("string"), F.col("node_v").cast("string"),
+            F.col("common_neighbors"),
+            F.col("tags"), F.col("timestamp"), F.col("weight"),
+            F.col("shared_coms"), F.col("only_u"), F.col("only_v"))
+                               .withColumn("new_community_id", F.expr("uuid()")))
 
-    print("Following 3 DFs after only_u_coms_with_neigh_coms was added")
-    printTrace("updated_community_tags:", updated_community_tags3)
-    printTrace("updated_communities:", updated_communities3)
-    printTrace("updated_vertices:", updated_vertices3)
+        new_community_edges = new_community_edges.withColumn(
+            "new_community_id",
+            F.when(
+                F.expr("size(shared_coms) > 0"),
+                F.first("new_community_id").over(Window.partitionBy("node_u", "node_v"))
+            ).otherwise(F.col("new_community_id"))
+        ).sort("timestamp")
 
-    saveState(updated_community_tags3, self.communityTags_path)
-    saveState(updated_communities3, self.communities_path)
-    saveState(updated_vertices3, self.vertices_path)
-    ### ONLY U ####
+        add_to_community_streaming(self, all_vertices, new_community_edges)
 
-    #### ONLY V ####
-    communitiesDf4 = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
-    communityTagsDf4 = loadState(self=self, pathToload=self.communityTags_path,
-                                schemaToCreate=self.communityTags_schema)
+    # if exploded_neigh_communities.isEmpty(): # no propagation - create new community and add the nodes
+    #     printMsg("exploded_neigh_communities is empty thus create new community and add the nodes")
+    #     new_community_edges = (exploded_neighbors
+    #     .select(
+    #         F.col("node_u").cast("string"), F.col("node_v").cast("string"),
+    #         F.col("common_neighbors"),
+    #         F.col("tags"), F.col("timestamp"), F.col("weight"),
+    #         F.col("shared_coms"), F.col("only_u"), F.col("only_v"))
+    #     .withColumn("new_community_id", F.expr("uuid()")))
+    #
+    #     new_community_edges = new_community_edges.withColumn(
+    #         "new_community_id",
+    #         F.when(
+    #             F.expr("size(shared_coms) > 0"),
+    #             F.first("new_community_id").over(Window.partitionBy("node_u", "node_v"))
+    #         ).otherwise(F.col("new_community_id"))
+    #     ).sort("timestamp")
+    #
+    #     add_to_community_streaming(self, all_vertices, new_community_edges)
+    #     return
+    # else:
+    #     print("Place holder for exploded_neigh_communities is NOT empty, reprinting it and return")
 
-    updated_community_tags4, updated_communities4, updated_vertices4 = (
-        add_to_community_streaming(all_vertices, only_v_coms_with_neigh_coms, communitiesDf4, communityTagsDf4))
+    # if not exploded_shared_coms_communities.isEmpty():
+    #     shared_com_not_in_common_neigh_community = (
+    #         exploded_shared_coms_communities.join(exploded_neigh_communities,
+    #                                               F.col("neighbor_community") == F.col("shared_coms_exploded"), how="left_anti")
+    #     ).withColumnRenamed("neighbor_community", "new_community_id")
+    #
+    #     shared_com_not_in_common_neigh_community = shared_com_not_in_common_neigh_community.withColumn("nodes", F.array("neighbor"))
+    #     printTrace("shared_com_not_in_common_neigh_community", shared_com_not_in_common_neigh_community)
+    #
+    #     add_to_community_streaming(self, all_vertices, shared_com_not_in_common_neigh_community)
 
-    print("Following 3 DFs after only_v_coms_with_neigh_coms was added")
-    printTrace("updated_community_tags:", updated_community_tags4)
-    printTrace("updated_communities:", updated_communities4)
-    printTrace("updated_vertices:", updated_vertices4)
 
-    saveState(updated_community_tags4, self.communityTags_path)
-    saveState(updated_communities4, self.communities_path)
-    saveState(updated_vertices4, self.vertices_path)
+    # only_u_coms_with_neigh_coms = ((exploded_only_u_communities.alias("only_u_coms")
+    #          .join(exploded_neigh_communities.alias("neigh_coms"),
+    #             F.col("neighbor_community") == F.col("only_u_exploded"), how="left_outer"))
+    #            .select(F.col("neigh_coms.node_u").cast("string"), F.col("neigh_coms.node_v").cast("string"),
+    #                 F.col("neigh_coms.common_neighbors"), F.col("neigh_coms.tags"), F.col("neigh_coms.timestamp"), F.col("neigh_coms.weight"),
+    #                 F.col("neigh_coms.shared_coms"), F.col("neigh_coms.only_u"), F.col("neigh_coms.only_v"),
+    #                 F.col("neigh_coms.neighbor_communities"), F.col("neigh_coms.neighbor_community")
+    #         ).distinct())
+    #
+    # only_u_coms_with_neigh_coms = only_u_coms_with_neigh_coms.withColumnRenamed("neighbor_community", "new_community_id").withColumn("nodes", F.array("node_v"))
+    # # only_u_coms_with_neigh_coms = only_u_coms_with_neigh_coms.withColumn("nodes", F.array("node_v"))
+    #
+    # printTrace("only_u_coms_with_neigh_coms", only_u_coms_with_neigh_coms)
+    #
+    # add_to_community_streaming(self, all_vertices, only_u_coms_with_neigh_coms)
 
+    # only_v_coms_with_neigh_coms = ((exploded_only_v_communities.alias("only_v_coms")
+    #         .join(exploded_neigh_communities.alias("neigh_coms"), F.col("neighbor_community") == F.col("only_v_exploded"), how="left_outer"))
+    #         .select(F.col("neigh_coms.node_u").cast("string"), F.col("neigh_coms.node_v").cast("string"),
+    #                     F.col("neigh_coms.common_neighbors"), F.col("neigh_coms.tags"), F.col("neigh_coms.timestamp"), F.col("neigh_coms.weight"),
+    #                     F.col("neigh_coms.shared_coms"), F.col("neigh_coms.only_u"), F.col("neigh_coms.only_v"),
+    #                     F.col("neigh_coms.neighbor_communities"), F.col("neigh_coms.neighbor_community")
+    # ).distinct())
+    # only_v_coms_with_neigh_coms = only_v_coms_with_neigh_coms.withColumnRenamed("neighbor_community", "new_community_id").withColumn("nodes", F.array("node_u"))
+    # # only_v_coms_with_neigh_coms = only_v_coms_with_neigh_coms.withColumn("nodes", F.array("node_u"))
+    #
+    # printTrace("only_v_coms_with_neigh_coms", only_v_coms_with_neigh_coms)
+    #
+    # add_to_community_streaming(self, all_vertices, only_v_coms_with_neigh_coms)
 
 def analyze_common_neighbors(self, common_neighbors: DataFrame, all_vertices: DataFrame) -> (DataFrame, DataFrame):
     if common_neighbors.isEmpty():
@@ -510,13 +494,13 @@ def analyze_common_neighbors(self, common_neighbors: DataFrame, all_vertices: Da
     #     .withColumn("neighbor_community", F.when(F.col("neighbor_community").isNotNull(), F.col("neighbor_community")))
     # )
 
-    exploded_neigh_communities = (
-        exploded_neighbors
-        .join(all_vertices.alias("all_nodes"), F.col("neighbor") == F.col("all_nodes.id"), "left")
-        .withColumn("neighbor_community", F.when(F.col("all_nodes.c_coms").isNotNull(), F.col("all_nodes.c_coms")).otherwise(F.array()))
-        .withColumn("neighbor_community", F.explode(F.col("neighbor_community")))   # -> skip null rows
-    #   .withColumn("neighbor_community", F.explode_outer(F.col("neighbor_community")))     # -> adds null in the column if empty
-    )
+    # exploded_neigh_communities = (
+    #     exploded_neighbors
+    #     .join(all_vertices.alias("all_nodes"), F.col("neighbor") == F.col("all_nodes.id"), "left")
+    #     .withColumn("neighbor_community", F.when(F.col("all_nodes.c_coms").isNotNull(), F.col("all_nodes.c_coms")).otherwise(F.array()))
+    #     .withColumn("neighbor_community", F.explode(F.col("neighbor_community")))   # -> skip null rows
+    # #   .withColumn("neighbor_community", F.explode_outer(F.col("neighbor_community")))     # -> adds null in the column if empty
+    # )
 
     # printTrace("exploded_neigh_communities", exploded_neigh_communities)
 
@@ -529,9 +513,9 @@ def analyze_common_neighbors(self, common_neighbors: DataFrame, all_vertices: Da
                                                                                             .otherwise(F.array())))
     exploded_shared_coms_communities = exploded_neighbors.withColumn("shared_coms_exploded", F.explode(F.when(F.expr("size(shared_coms) > 0"), F.col("shared_coms"))
                                                                                             .otherwise(F.array())))
-    printTrace("exploded_only_u_communities", exploded_only_u_communities)
-    printTrace("exploded_only_v_communities", exploded_only_v_communities)
-    printTrace("exploded_shared_coms_communities", exploded_shared_coms_communities)
+    # printTrace("exploded_only_u_communities", exploded_only_u_communities)
+    # printTrace("exploded_only_v_communities", exploded_only_v_communities)
+    # printTrace("exploded_shared_coms_communities", exploded_shared_coms_communities)
 
     return exploded_only_u_communities, exploded_only_v_communities, exploded_shared_coms_communities, exploded_neighbors
 
@@ -944,7 +928,7 @@ def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: D
     #     shared_coms, on=["src", "dst"], how="left_anti"
     # ).withColumn("community_id", F.monotonically_increasing_id())
 
-def add_to_community_streaming(all_vertices:DataFrame, new_community_edges:DataFrame, communitiesDf:DataFrame, communityTagsDf:DataFrame):
+def add_to_community_streaming(self, all_vertices:DataFrame, new_community_edges:DataFrame):
     """
     Args:
         new_community_edges: DataFrame containing new community information with columns
@@ -956,7 +940,10 @@ def add_to_community_streaming(all_vertices:DataFrame, new_community_edges:DataF
         Updated communitiesDf and communityTagsDf as DataFrames
     """
     if new_community_edges.isEmpty():
-        return None, None, all_vertices
+        return
+
+    communitiesDf = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
+    communityTagsDf = loadState(self=self, pathToload=self.communityTags_path, schemaToCreate=self.communityTags_schema)
 
     # Step 1: Process and aggregate tags by new_community_id
     new_tags = (
@@ -1072,7 +1059,22 @@ def add_to_community_streaming(all_vertices:DataFrame, new_community_edges:DataF
     # printTrace("updated_communities: ", updated_communities)
     # printTrace("updated_vertices: ", updated_vertices)
 
-    return updated_community_tags, updated_communities, updated_vertices
+    print("Following 3 DFs after inside add() was added BEFORE added")
+    printTrace("updated_community_tags:", updated_community_tags)
+    printTrace("updated_communities:", updated_communities)
+    printTrace("updated_vertices:", updated_vertices)
+
+    saveState(updated_community_tags, self.communityTags_path)
+    saveState(updated_communities, self.communities_path)
+    saveState(updated_vertices, self.vertices_path)
+
+    print("Following 3 DFs after inside add() was added AFTER added")
+    printTrace("updated_community_tags:", updated_community_tags)
+    printTrace("updated_communities:", updated_communities)
+    printTrace("updated_vertices:", updated_vertices)
+
+
+    # return updated_community_tags, updated_communities, updated_vertices
 
 
 
@@ -1375,7 +1377,7 @@ def printTrace(msg: string, df: DataFrame):
         print("^ empty ^")
 
 def remove_edge(self, dfToRemove:DataFrame):
-    if (dfToRemove.isEmpty()):
+    if dfToRemove.isEmpty():
         return
     print("removing edges:")
 
@@ -1383,6 +1385,12 @@ def remove_edge(self, dfToRemove:DataFrame):
     all_vertices, all_edges = loadStateVerticesAndEdges(self)
     printTrace("remove_edge: dfToRemove:", dfToRemove)
     printTrace("remove_edge: loaded all_edges:", all_edges)
+
+    all_edges = normalize_edges(all_edges)
+    dfToRemove = normalize_edges(dfToRemove)
+
+    # TODO check self.g.has_edge here .to dataframe logic
+    dfToRemove = dfToRemove.join(all_edges, on=["src", "dst"], how="left_outer")
 
     common_neighbors = common_neighbor_detection(all_edges, dfToRemove)
 
