@@ -322,7 +322,7 @@ def add_community_neighbors(self, exploded_neighbors: DataFrame, exploded_only_u
     ).distinct())
     only_v_coms_with_neigh_coms = only_v_coms_with_neigh_coms.withColumnRenamed("neighbor_community", "new_community_id").withColumn("nodes", F.array("node_u"))
 
-    printTrace("only_v_coms_with_neigh_coms", only_v_coms_with_neigh_coms)
+    # printTrace("only_v_coms_with_neigh_coms", only_v_coms_with_neigh_coms)
 
     add_to_community_streaming(self, all_vertices, only_v_coms_with_neigh_coms)
 
@@ -337,7 +337,7 @@ def add_community_neighbors(self, exploded_neighbors: DataFrame, exploded_only_u
 
     only_u_coms_with_neigh_coms = only_u_coms_with_neigh_coms.withColumnRenamed("neighbor_community", "new_community_id").withColumn("nodes", F.array("node_v"))
 
-    printTrace("only_u_coms_with_neigh_coms", only_u_coms_with_neigh_coms)
+    # printTrace("only_u_coms_with_neigh_coms", only_u_coms_with_neigh_coms)
 
     add_to_community_streaming(self, all_vertices, only_u_coms_with_neigh_coms)
 
@@ -348,7 +348,7 @@ def add_community_neighbors(self, exploded_neighbors: DataFrame, exploded_only_u
     ).withColumnRenamed("neighbor_community", "new_community_id")
 
     shared_com_not_in_common_neigh_community = shared_com_not_in_common_neigh_community.withColumn("nodes", F.array("neighbor"))
-    printTrace("shared_com_not_in_common_neigh_community", shared_com_not_in_common_neigh_community)
+    # printTrace("shared_com_not_in_common_neigh_community", shared_com_not_in_common_neigh_community)
 
     add_to_community_streaming(self, all_vertices, shared_com_not_in_common_neigh_community)
 
@@ -476,7 +476,7 @@ def analyze_common_neighbors(self, common_neighbors: DataFrame, all_vertices: Da
         .drop("id")
     )
 
-    printTrace("all_vertices", all_vertices)
+    # printTrace("all_vertices", all_vertices)
     # printTrace("exploded_neighbors", exploded_neighbors)
 
     # exploded_neighbor = (
@@ -979,9 +979,9 @@ def add_to_community_streaming(self, all_vertices:DataFrame, new_community_edges
     # |1d6ecd17-4d3a-412...|[debugging, memor...|
     # |7ef9bac1-1070-473...|[command-line, le...|
     # +--------------------+--------------------+
-    printTrace("new_communities: ", new_communities)
-    printTrace("communitiesDf: (inside add() first loaded)", communitiesDf)
-    printTrace("communityTagsDf: (inside add() first loaded)", communityTagsDf)
+    # printTrace("new_communities: ", new_communities)
+    # printTrace("communitiesDf: (inside add() first loaded)", communitiesDf)
+    # printTrace("communityTagsDf: (inside add() first loaded)", communityTagsDf)
 
     # Step 3: Combine and update communityTags and communities
     if communityTagsDf.isEmpty():
@@ -1059,10 +1059,10 @@ def add_to_community_streaming(self, all_vertices:DataFrame, new_community_edges
     # printTrace("updated_communities: ", updated_communities)
     # printTrace("updated_vertices: ", updated_vertices)
 
-    print("Following 3 DFs after inside add() was added BEFORE added")
-    printTrace("updated_community_tags:", updated_community_tags)
-    printTrace("updated_communities:", updated_communities)
-    printTrace("updated_vertices:", updated_vertices)
+    # print("Following 3 DFs after inside add() was added BEFORE added")
+    # printTrace("updated_community_tags:", updated_community_tags)
+    # printTrace("updated_communities:", updated_communities)
+    # printTrace("updated_vertices:", updated_vertices)
 
     saveState(updated_community_tags, self.communityTags_path)
     saveState(updated_communities, self.communities_path)
@@ -1299,28 +1299,50 @@ def common_neighbor_detection(all_edges: DataFrame, edge_updates: DataFrame):
 
     # Join edges with valid nodes to ensure u and v both meet the condition
     valid_edges = (
-        edge_updates.alias("edges")
-        .join(valid_neighbors.alias("valid_u"), F.col("edges.src") == F.col("valid_u.node"))
-        .join(valid_neighbors.alias("valid_v"), F.col("edges.dst") == F.col("valid_v.node"))
+        edge_updates.alias("edge_updates")
+        .join(valid_neighbors.alias("valid_u"), F.col("edge_updates.src") == F.col("valid_u.node"))
+        .join(valid_neighbors.alias("valid_v"), F.col("edge_updates.dst") == F.col("valid_v.node"))
     )
 
-    # Find common neighbors for valid (u, v) pairs
-    common_neighbors = (
+    # printTrace("valid edges: ", valid_edges)
+
+    neighbors_of_each_node = (
         valid_edges
-        .join(neighbors.alias("u_neighbors"), F.col("edges.src") == F.col("u_neighbors.node"), "inner")
-        .join(neighbors.alias("v_neighbors"), F.col("edges.dst") == F.col("v_neighbors.node"), "inner")
-        .filter(F.col("u_neighbors.neighbor") == F.col("v_neighbors.neighbor"))
+        .join(neighbors.alias("u_neighbors"), F.col("edge_updates.src") == F.col("u_neighbors.node"), "inner")
+        .join(neighbors.alias("v_neighbors"), F.col("edge_updates.dst") == F.col("v_neighbors.node"), "inner")
         .select(
-            F.col("edges.src").alias("node_u"),
-            F.col("edges.dst").alias("node_v"),
-            F.col("u_neighbors.neighbor").alias("common_neighbor"),
-            F.col("edges.tags").alias("tags"),
-            F.col("edges.timestamp").alias("timestamp"),
-            F.col("edges.weight").alias("weight")
+            F.col("edge_updates.src").alias("node_u"),
+            F.col("edge_updates.dst").alias("node_v"),
+            F.col("u_neighbors.neighbor").alias("common_u_neighbor"),
+            F.col("v_neighbors.neighbor").alias("common_v_neighbor"),
+            F.col("edge_updates.tags").alias("tags"),
+            F.col("edge_updates.timestamp").alias("timestamp"),
+            F.col("edge_updates.weight").alias("weight")
         )
         .groupBy("node_u", "node_v", "tags", "timestamp", "weight")
-        .agg(F.collect_set("common_neighbor").alias("common_neighbors"))
+        .agg(F.collect_set("common_u_neighbor").alias("common_u_neighbor"), F.collect_set("common_v_neighbor").alias("common_v_neighbor"))
     )
+
+    common_neighbors = neighbors_of_each_node.withColumn("common_neighbors", F.array_intersect(F.col("common_v_neighbor"), F.col("common_u_neighbor")))
+
+    # Find common neighbors for valid (u, v) pairs
+    # common_neighbors2 = (
+    #     valid_edges
+    #     .join(neighbors.alias("u_neighbors"), F.col("edge_updates.src") == F.col("u_neighbors.node"), "inner")
+    #     .join(neighbors.alias("v_neighbors"), F.col("edge_updates.dst") == F.col("v_neighbors.node"), "inner")
+    #     .filter(F.col("u_neighbors.neighbor") == F.col("v_neighbors.neighbor"))
+    #     .select(
+    #         F.col("edge_updates.src").alias("node_u"),
+    #         F.col("edge_updates.dst").alias("node_v"),
+    #         F.col("u_neighbors.neighbor").alias("common_neighbor"),
+    #         F.col("edge_updates.tags").alias("tags"),
+    #         F.col("edge_updates.timestamp").alias("timestamp"),
+    #         F.col("edge_updates.weight").alias("weight")
+    #     )
+    #     .groupBy("node_u", "node_v", "tags", "timestamp", "weight")
+    #     .agg(F.collect_set("common_neighbor").alias("common_neighbors"))
+    # )
+    # printTrace("common_neighbors2(inside)", common_neighbors2)
     # printTrace("common_neighbors(inside)", common_neighbors)
 
     return common_neighbors.sort("timestamp")
@@ -1376,7 +1398,7 @@ def printTrace(msg: string, df: DataFrame):
     else:
         print("^ empty ^")
 
-def remove_edge(self, dfToRemove:DataFrame):
+def remove_edge(self, dfToRemove: DataFrame):
     if dfToRemove.isEmpty():
         return
     print("removing edges:")
@@ -1389,10 +1411,20 @@ def remove_edge(self, dfToRemove:DataFrame):
     all_edges = normalize_edges(all_edges)
     dfToRemove = normalize_edges(dfToRemove)
 
-    # TODO check self.g.has_edge here .to dataframe logic
-    dfToRemove = dfToRemove.join(all_edges, on=["src", "dst"], how="left_outer")
+    existing_edges = (
+        dfToRemove.alias("remove")
+        .join(all_edges.alias("all"),
+            ((F.col("remove.src") == F.col("all.src")) & (F.col("remove.dst") == F.col("all.dst"))) |
+            ((F.col("remove.src") == F.col("all.dst")) & (F.col("remove.dst") == F.col("all.src"))),
+            how="left_outer"
+        ).select("remove.*")
+    )
 
-    common_neighbors = common_neighbor_detection(all_edges, dfToRemove)
+    printTrace("remove_edge: existing_edges ", existing_edges)
+
+    #TODO I need neighbors of u, v and common
+
+    common_neighbors = common_neighbor_detection(all_edges, existing_edges)
 
     printTrace("remove_edge: common_neighbor ", common_neighbors)
 
@@ -1402,8 +1434,13 @@ def remove_edge(self, dfToRemove:DataFrame):
     printTrace("remove_edge: exploded_only_u_communities ", exploded_only_u_communities)
     printTrace("remove_edge: exploded_only_v_communities ", exploded_only_v_communities)
     printTrace("remove_edge: exploded_shared_coms_communities ", exploded_shared_coms_communities)
-    # printTrace("remove_edge: exploded_neighbors ", exploded_neighbors)
 
+
+    # printTrace("remove_edge: exploded_neighbors ", exploded_neighbors)
+    # XX_coms_exploded is the column we need from the above dfs,
+
+
+    print("end of remove edge")
 
 
 
