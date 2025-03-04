@@ -1503,9 +1503,40 @@ def remove_edge(self, dfToRemove: DataFrame):
     else:
         removeFromComDfU = exploded_only_u_communities.filter(F.expr("size(common_u_neighbor) < 2"))
         removeFromComDfV = exploded_only_v_communities.filter(F.expr("size(common_v_neighbor) < 2"))
+        remove_from_community(self, removeFromComDfU)
+        remove_from_community(self, removeFromComDfV)
 
-    remove_from_community(self, removeFromComDfU)
-    remove_from_community(self, removeFromComDfV)
+    # Remove edge
+    vertices_state, edges_state = loadStateVerticesAndEdges(self)
+    # Step 1: Remove edges from edges_state that exist in existing_edges
+    filtered_edges_state = edges_state.join(
+        existing_edges,
+        on=["src", "dst"],
+        how="left_anti"  # Keep only edges that do not match existing_edges
+    )
+
+    # Step 2: Identify nodes that are in existing_edges (to check if they should be removed)
+    nodes_to_check = existing_edges.select(F.col("src").alias("node")).union(
+        existing_edges.select(F.col("dst").alias("node"))
+    ).distinct()
+
+    # Step 3: Find nodes that no longer have any edges in the updated edges_state
+    remaining_nodes = filtered_edges_state.select(F.col("src").alias("node")).union(
+        filtered_edges_state.select(F.col("dst").alias("node"))
+    ).distinct()
+
+    # Nodes to remove: those that were in nodes_to_check but are not in remaining_nodes
+    nodes_to_remove = nodes_to_check.join(remaining_nodes, on="node", how="left_anti")
+
+    # Step 4: Remove these nodes from vertices_state
+    filtered_vertices_state = vertices_state.join(nodes_to_remove, on="node", how="left_anti")
+    printTrace("Updated edges_state after removal(Gefore save):", filtered_edges_state)
+    printTrace("Updated vertices_state after removal(Gefore save):", filtered_vertices_state)
+    saveStateVerticesAndEdges(self, filtered_vertices_state, filtered_edges_state)
+    printTrace("Updated edges_state after removal(After save):", filtered_edges_state)
+    printTrace("Updated vertices_state after removal(After save):", filtered_vertices_state)
+
+
 
     if coms_to_change_df and not coms_to_change_df.isEmpty():
         print("update_shared_coms should run here")
