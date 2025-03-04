@@ -1507,7 +1507,7 @@ def remove_edge(self, dfToRemove: DataFrame):
         remove_from_community(self, removeFromComDfV)
 
     # Remove edge
-    vertices_state, edges_state = loadStateVerticesAndEdges(self)
+    edges_state = loadState(self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
     # Step 1: Remove edges from edges_state that exist in existing_edges
     filtered_edges_state = edges_state.join(
         existing_edges,
@@ -1515,26 +1515,27 @@ def remove_edge(self, dfToRemove: DataFrame):
         how="left_anti"  # Keep only edges that do not match existing_edges
     )
 
-    # Step 2: Identify nodes that are in existing_edges (to check if they should be removed)
-    nodes_to_check = existing_edges.select(F.col("src").alias("node")).union(
-        existing_edges.select(F.col("dst").alias("node"))
-    ).distinct()
+    # # Step 2: Identify nodes that are in existing_edges (to check if they should be removed)
+    # nodes_to_check = existing_edges.select(F.col("src").alias("node")).union(
+    #     existing_edges.select(F.col("dst").alias("node"))
+    # ).distinct()
+    #
+    # # Step 3: Find nodes that no longer have any edges in the updated edges_state
+    # remaining_nodes = filtered_edges_state.select(F.col("src").alias("node")).union(
+    #     filtered_edges_state.select(F.col("dst").alias("node"))
+    # ).distinct()
+    #
+    # # Nodes to remove: those that were in nodes_to_check but are not in remaining_nodes
+    # nodes_to_remove = nodes_to_check.join(remaining_nodes, on="node", how="left_anti")
+    # printTrace("nodes_to_remove", nodes_to_remove)
+    #
+    # # Step 4: Remove these nodes from vertices_state
+    # filtered_vertices_state = vertices_state.join(nodes_to_remove, on="node", how="left_anti")
 
-    # Step 3: Find nodes that no longer have any edges in the updated edges_state
-    remaining_nodes = filtered_edges_state.select(F.col("src").alias("node")).union(
-        filtered_edges_state.select(F.col("dst").alias("node"))
-    ).distinct()
-
-    # Nodes to remove: those that were in nodes_to_check but are not in remaining_nodes
-    nodes_to_remove = nodes_to_check.join(remaining_nodes, on="node", how="left_anti")
-
-    # Step 4: Remove these nodes from vertices_state
-    filtered_vertices_state = vertices_state.join(nodes_to_remove, on="node", how="left_anti")
-    printTrace("Updated edges_state after removal(Gefore save):", filtered_edges_state)
-    printTrace("Updated vertices_state after removal(Gefore save):", filtered_vertices_state)
-    saveStateVerticesAndEdges(self, filtered_vertices_state, filtered_edges_state)
-    printTrace("Updated edges_state after removal(After save):", filtered_edges_state)
-    printTrace("Updated vertices_state after removal(After save):", filtered_vertices_state)
+    printTrace("Updated edges_state after removal(Before save):", filtered_edges_state)
+    saveState(filtered_edges_state, self.edges_path)
+    # CHECK IF THIS IS SAVED CORRECTLY
+    # printTrace("Updated edges_state after removal(After save):", filtered_edges_state)
 
 
 
