@@ -1636,7 +1636,7 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
             F.col("cc.id") == F.col("ec.node"),
             "inner"
         )
-        .select(F.col("ec.community"), F.col("cc.id"), F.col("cc.component"))
+        .select(F.col("ec.community"), F.col("cc.id"), F.col("cc.component"), F.col("node"))
     )
 
     community_components = (
@@ -1676,13 +1676,26 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
         modify_after_removal(self, node_of_graph_and_shared_coms, common_neighbors_df)
     else:
         # broken community: bigger one maintains the id, the others obtain a new one
-        to_mod_df = broken_coms_df.select(
+        agg_comps = (connected_components.groupBy("component").agg(F.collect_set("community").alias("communities"),
+                                          F.collect_set("id").alias("nodes"))
+                     .select("component", "nodes","communities"))
+        # printTrace("agg_comps", agg_comps)
+        first_comps_df = broken_coms_df.select(
             "community", "num_components",
-            F.expr("components[0]").alias("node")  # Extract first node efficiently
+            F.expr("components[0]").alias("component")
         )
-        printTrace("to_mod_df", to_mod_df)
+        first_joined_comps = agg_comps.alias("agg_comps").join(first_comps_df.alias("first"),
+                                                         on=F.col("agg_comps.component") == F.col("first.component"),
+                                                         how="inner")
+        printTrace("first_joined_comps (first node extraction)", first_joined_comps)
 
-        to_destroy_coms = to_mod_df.filter(F.col("num_components") < 3)
+
+        to_destroy_coms = first_joined_comps.filter(F.expr("size(nodes) < 3"))
+        to_destroy_coms = to_destroy_coms.withColumn("community", F.explode("communities"))
+
+        first_to_mod_comps = first_joined_comps.filter(F.expr("size(nodes) >= 3"))
+        printTrace("first_to_mod_comps", first_to_mod_comps)
+
         if not to_destroy_coms.isEmpty():
             destroy_communities(self, to_destroy_coms)
         else:
@@ -1692,21 +1705,32 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
                                       .agg(F.collect_set("community").alias("communities_from_shared_coms")))
 
             printTrace("aggregated_shared_coms", aggregated_shared_coms)
-            to_mod_df = to_mod_df.withColumn("remaining_node", F.explode("remaining_nodes"))
+
+            exploded_first_comps_df = first_to_mod_comps.withColumn("node", F.explode("nodes"))
             nodes_for_modify = aggregated_shared_coms.join(
-                to_mod_df, F.col("remaining_node") == F.col("affected_node"),
+                exploded_first_comps_df, F.col("node") == F.col("affected_node"),
                 "inner"
-            ).select("community", "remaining_node").distinct()
+            ).select("community", "node").distinct()
 
             printTrace("nodes_for_modify", nodes_for_modify)
             modify_after_removal(self, nodes_for_modify, common_neighbors_df)
 
-        except_first_comp = broken_coms_df.select(
+
+        agg_comps = (connected_components.groupBy("component").agg(F.collect_set("community").alias("communities"),
+                                                                   F.collect_set("id").alias("nodes"))
+                     .select("component", "nodes", "communities"))
+        exploded_broken_coms_df = broken_coms_df.withColumn("component", F.explode("components"))
+
+        joined_comps = agg_comps.alias("agg_comps").join(exploded_broken_coms_df.alias("broken"),
+                                                         on=F.col("agg_comps.component") == F.col("broken.component"),
+                                                         how="inner")
+        # TODO Check this next time, we dont need components but the above aggregated with the nodes
+        except_first_comp = joined_comps.select(
             "community", "num_components",
             F.expr("slice(components, 2, size(components) - 1)").alias("remaining_nodes")  # Keep all except first
         )
         remaining_comps = except_first_comp.filter(F.expr("size(remaining_nodes) > 3"))
-        remaining_comps = remaining_comps.withColumn("remaining_node", F.explode(F.col("remaining_nodes")))
+        # remaining_comps = remaining_comps.withColumn("remaining_node", F.explode(F.col("remaining_nodes")))
 
         exploded_shared_coms = shared_coms.withColumn("affected_node", F.explode(F.col("affected_nodes")))
 
