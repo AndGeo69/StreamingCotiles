@@ -1562,6 +1562,8 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
 
     saved_communities = loadState(self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
 
+    printTrace("update_shared_coms saved_communities", saved_communities)
+
     preexisting_coms = (shared_coms.join(saved_communities,
                                          saved_communities["cid"] == shared_coms["community"], "inner")
                         .select(F.col("community"), F.col("affected_nodes")).distinct())
@@ -1571,14 +1573,22 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
 
     # Perform a left join using explicit aliases
     updated_coms_df = (
-        preexisting_coms_alias
-        .join(
-            saved_communities_alias,
+        saved_communities_alias
+        .join(preexisting_coms_alias,
             F.col("pre.community") == F.col("saved.cid"),
             "left"
         )
         .select(F.col("pre.community"), F.col("saved.nodes").alias("nodes"))
     )
+    # updated_coms_df = (
+    #     preexisting_coms_alias
+    #     .join(
+    #         saved_communities_alias,
+    #         F.col("pre.community") == F.col("saved.cid"),
+    #         "left"
+    #     )
+    #     .select(F.col("pre.community"), F.col("saved.nodes").alias("nodes"))
+    # )
 
     # If a community doesn't exist in saved_communities, provide an empty list instead of NULL
     updated_coms_df = updated_coms_df.withColumn(
@@ -1643,7 +1653,8 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
         connected_components.groupBy("community")
         .agg(
             F.countDistinct("component").alias("num_components"),
-            F.collect_set("component").alias("components")
+            F.collect_set("component").alias("components"),
+            F.collect_set("id").alias("nodes")
         )
     )
 
@@ -1676,10 +1687,25 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
         modify_after_removal(self, node_of_graph_and_shared_coms, common_neighbors_df)
     else:
         # broken community: bigger one maintains the id, the others obtain a new one
-        agg_comps = (connected_components.groupBy("component").agg(F.collect_set("community").alias("communities"),
-                                          F.collect_set("id").alias("nodes"))
-                     .select("component", "nodes","communities"))
-        # printTrace("agg_comps", agg_comps)
+        # agg_comps = (connected_components.groupBy("component").agg(F.collect_set("community").alias("communities"),
+        #                                   F.collect_set("id").alias("nodes"))
+        #              .select("component", "nodes","communities"))
+
+        # might no longer need agg_comps test this
+        # i need the first biggest comm because networkx conn_comp() returns ordered biggest first
+
+        agg_comps = (
+            connected_components.groupBy("component")
+            .agg(
+                F.collect_set("id").alias("nodes"),
+                F.countDistinct("id").alias("num_nodes"),
+                F.collect_set("community").alias("communities")
+            )
+        )
+        printTrace("agg_comps", agg_comps)
+
+        biggest_component = agg_comps.orderBy(F.desc("num_components")).limit(1)
+
         first_comps_df = broken_coms_df.select(
             "community", "num_components",
             F.expr("components[0]").alias("component")
@@ -1765,7 +1791,7 @@ def destroy_communities(self, communitiesToRemove: DataFrame):
         return
     printMsg("- Destroying communities")
     saved_communities = loadState(self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
-    updated_communities = saved_communities.join(
+    updated_communities = saved_communities.alias("saved_communities").join(
             communitiesToRemove.alias("communitiesToRemove"),
             (F.col("communitiesToRemove.community") == F.col("saved_communities.cid")),
             how="left_anti"
