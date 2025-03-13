@@ -192,10 +192,14 @@ class TILES:
 
         updated_edges = update_graph_with_edges(edges_state, new_edges)
 
+        printTrace("vertices_state before 1st left_anti", vertices_state)
         new_nodes_filtered = new_nodes.join(vertices_state.select("id"), on="id", how="left_anti")
+        printTrace("new_nodes_filtered after 1st left_anti", new_nodes_filtered)
 
         # Update state
         updated_vertices = vertices_state.unionByName(new_nodes_filtered).dropDuplicates(subset=["id"])
+        printTrace("updated_vertices after 1st union", updated_vertices)
+
 
         # combined_edges = updated_edges.unionByName(edges_state)
         # printTrace("combined_edges (after union, before deduplication)", combined_edges)
@@ -245,6 +249,7 @@ class TILES:
         # printTrace("updated_edges: (before evo)", updated_edges)
         # printTrace("all all_edges: (before evo)", all_edges)
         printTrace("firstTimeEdges: ", firstTimeEdges)
+        printTrace("all_vertices 1st Loaded (after updated_vertices) : ", all_vertices)
 
         # common_neighbors = common_neighbor_detection(updated_edges, firstTimeEdges)
         common_neighbors = common_neighbor_detection(all_edges, firstTimeEdges)
@@ -291,9 +296,10 @@ class TILES:
             # saveState(updated_vertices, self.vertices_path)
 
         saveStateVerticesAndEdges(self, updated_vertices, updated_edges)
-        all_vertices, all_edges = loadStateVerticesAndEdges(self)
-        printTrace("all_vertices Loaded - Last step", all_vertices)
-        printTrace("all_edges Loaded - Last step: ", all_edges)
+        # all_vertices, all_edges = loadStateVerticesAndEdges(self)
+        latest_vertices, latest_edges = loadStateVerticesAndEdges(self)
+        printTrace("all_vertices Loaded - Last step", latest_vertices)
+        printTrace("all_edges Loaded - Last step: ", latest_edges)
 
         # Show the updated edges (debugging)
         # printMsg("graph edges:")
@@ -384,12 +390,36 @@ def add_community_neighbors(self, exploded_neighbors: DataFrame, exploded_only_u
     if exploded_neigh_communities.isEmpty() or (only_v_coms_with_neigh_coms.isEmpty() and only_u_coms_with_neigh_coms.isEmpty() and
                                                 (shared_com_not_in_common_neigh_community is not None and shared_com_not_in_common_neigh_community.isEmpty())):
         printMsg("exploded_neigh_communities is empty thus create new community and add the nodes")
-        new_community_edges = (exploded_neighbors.select(
-            F.col("node_u").cast("string"), F.col("node_v").cast("string"),
-            F.col("common_neighbors"),
-            F.col("tags"), F.col("timestamp"), F.col("weight"),
-            F.col("shared_coms"), F.col("only_u"), F.col("only_v"))
-                               .withColumn("new_community_id", F.expr("uuid()")))
+        # printTrace("exploded_neighbors", exploded_neighbors)
+        new_community_edges = (
+            exploded_neighbors
+            .select(
+                F.col("node_u").cast("string"), F.col("node_v").cast("string"),
+                F.col("common_neighbors"),
+                F.col("tags"), F.col("timestamp"), F.col("weight"),
+                F.col("shared_coms"), F.col("only_u"), F.col("only_v")
+            )
+            .groupBy("node_u", "node_v", "common_neighbors")
+            .agg(
+                F.first("tags").alias("tags"),
+                F.first("timestamp").alias("timestamp"),
+                F.first("weight").alias("weight"),
+                F.first("shared_coms").alias("shared_coms"),
+                F.first("only_u").alias("only_u"),
+                F.first("only_v").alias("only_v")
+            )
+            .withColumn("new_community_id", F.expr("uuid()"))
+        )
+
+        # new_community_edges = (exploded_neighbors.select(
+        #     F.col("node_u").cast("string"), F.col("node_v").cast("string"),
+        #     F.col("common_neighbors"),
+        #     F.col("tags"), F.col("timestamp"), F.col("weight"),
+        #     F.col("shared_coms"), F.col("only_u"), F.col("only_v"))
+        #                        .withColumn("new_community_id", F.expr("uuid()")))
+
+        # printTrace("new_community_edges p1", new_community_edges)
+
 
         new_community_edges = new_community_edges.withColumn(
             "new_community_id",
@@ -399,12 +429,17 @@ def add_community_neighbors(self, exploded_neighbors: DataFrame, exploded_only_u
             ).otherwise(F.col("new_community_id"))
         ).sort("timestamp")
 
-        # printTrace("before add_to_community_streaming new_community_edges communitiesDf", updated_communities)
+        printTrace("new_community_edges: p2 ", new_community_edges)
         # printTrace("before add_to_community_streaming new_community_edges communityTagsDf", updated_community_tags)
         updated_community_tags, updated_communities, updated_vertices = (
             add_to_community_streaming(self, all_vertices, new_community_edges, updated_communities, updated_community_tags))
         # printTrace("after add_to_community_streaming new_community_edges communitiesDf", updated_communities)
         # printTrace("after add_to_community_streaming new_community_edges communityTagsDf", updated_community_tags)
+
+        printTrace("updated_community_tags: (after save) ", updated_community_tags)
+        printTrace("updated_communities: (after save) ", updated_communities)
+        printTrace("updated_vertices: (after save) ", updated_vertices)
+
         saveState(updated_community_tags, self.communityTags_path)
         saveState(updated_communities, self.communities_path)
         saveState(updated_vertices, self.vertices_path)
@@ -1630,6 +1665,9 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
         F.collect_set("community").alias("communities"))
 
     vertices_df = node_communities_df.withColumnRenamed("node", "id")
+
+    vertices_df.count()
+    subgraph_edges_df_agg.count()
     subgraph = GraphFrame(vertices_df, subgraph_edges_df_agg)
 
     # Compute connected components
