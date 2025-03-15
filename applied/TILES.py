@@ -189,12 +189,13 @@ class TILES:
 
         # Load previous state
         vertices_state, edges_state = loadStateVerticesAndEdges(self)
+        edges_state = normalize_edges(edges_state)
 
         updated_edges = update_graph_with_edges(edges_state, new_edges)
 
-        printTrace("vertices_state before 1st left_anti", vertices_state)
+        # printTrace("vertices_state before 1st left_anti", vertices_state)
         new_nodes_filtered = new_nodes.join(vertices_state.select("id"), on="id", how="left_anti")
-        printTrace("new_nodes_filtered after 1st left_anti", new_nodes_filtered)
+        # printTrace("new_nodes_filtered after 1st left_anti", new_nodes_filtered)
 
         # Update state
         updated_vertices = vertices_state.unionByName(new_nodes_filtered).dropDuplicates(subset=["id"])
@@ -300,6 +301,7 @@ class TILES:
         latest_vertices, latest_edges = loadStateVerticesAndEdges(self)
         printTrace("all_vertices Loaded - Last step", latest_vertices)
         printTrace("all_edges Loaded - Last step: ", latest_edges)
+        print("end of processing batch...")
 
         # Show the updated edges (debugging)
         # printMsg("graph edges:")
@@ -311,6 +313,15 @@ class TILES:
 def add_community_neighbors(self, exploded_neighbors: DataFrame, exploded_only_u_communities:DataFrame, exploded_only_v_communities:DataFrame, exploded_shared_coms_communities: DataFrame, all_vertices: DataFrame) -> (DataFrame, DataFrame):
     if exploded_neighbors is None or exploded_neighbors.isEmpty():
         return
+
+    exploded_neighbors.cache()
+    exploded_neighbors.count()
+    exploded_only_u_communities.cache()
+    exploded_only_u_communities.count()
+    exploded_only_v_communities.cache()
+    exploded_only_v_communities.count()
+    exploded_shared_coms_communities.cache()
+    exploded_shared_coms_communities.count()
 
     printMsg("Adding to neighbors to community...")
     # printTrace("add_community_neighbors exploded_neighbors", exploded_neighbors)
@@ -1111,8 +1122,8 @@ def add_to_community_streaming(self, all_vertices:DataFrame, new_community_edges
         #     F.coalesce(new_communities.cid, communitiesDf.cid),
         #     F.coalesce(new_communities.nodes, communitiesDf.nodes).alias("nodes")
         # )
-
-    # printTrace("updated_communities before new changes: ", updated_communities)
+    updated_communities = updated_communities.filter(F.col("cid").isNotNull())
+    printTrace("updated_communities before new changes: ", updated_communities)
 
     community_nodes = updated_communities.select(F.explode("nodes").alias("id"), F.col("cid").cast("string")).distinct()
     community_nodes = community_nodes.groupBy("id").agg(
@@ -1666,8 +1677,8 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
 
     vertices_df = node_communities_df.withColumnRenamed("node", "id")
 
-    vertices_df.count()
-    subgraph_edges_df_agg.count()
+    # vertices_df.count()
+    # subgraph_edges_df_agg.count()
     subgraph = GraphFrame(vertices_df, subgraph_edges_df_agg)
 
     # Compute connected components
@@ -1742,10 +1753,67 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
         )
         printTrace("agg_comps", agg_comps)
 
-        biggest_component = agg_comps.orderBy(F.desc("num_components")).limit(1)
+        biggest_component = agg_comps.orderBy(F.desc("num_nodes")).limit(1)
+
+        to_destroy_coms = biggest_component.filter(F.expr("size(nodes) < 3"))
+        destroy_communities(self, to_destroy_coms)
+
+        # to_modify_coms_of_biggest_comp = biggest_component.filter(F.expr("size(nodes) > 2"))
+        # to_modify_coms_of_biggest_comp_exploded_coms = to_modify_coms_of_biggest_comp.withColumn("community", F.explode(F.col("communities")))
+        # big_to_modify = (to_modify_coms_of_biggest_comp_exploded_coms.alias("big_to_mod_expl")
+        #                  .join(
+        #                    shared_coms, on=F.col("shared_coms.community") == F.col("big_to_mod_expl.community"), how="inner"
+        #                 ).alias("bigMod_sharedComs")
+        #                 .join(
+        #                     broken_coms_df, on=F.col("bigMod_sharedComs.community") == F.col("broken_coms_df.community"), how="inner"
+        #                 )
+        # )
+
+
+        to_modify_coms_of_biggest_comp = biggest_component.filter(F.expr("size(nodes) > 2"))
+        to_modify_coms_of_biggest_comp_exploded_coms = to_modify_coms_of_biggest_comp.withColumn("community", F.explode(F.col("communities")))
+        # printTrace("to_modify_coms_of_biggest_comp_exploded_coms", to_modify_coms_of_biggest_comp_exploded_coms)
+
+        #
+        shared_nodes_of_biggest_comp = (to_modify_coms_of_biggest_comp_exploded_coms.alias("big_to_mod_expl")
+                .join(
+            shared_coms.alias("shared_coms"),
+            on=F.col("shared_coms.community") == F.col("big_to_mod_expl.community"), how="inner"
+        ).select("big_to_mod_expl.nodes", "big_to_mod_expl.communities", "big_to_mod_expl.community").alias(
+            "bigMod_sharedComs")
+                .join(
+            broken_coms_df.alias("broken_coms_df"),
+            on=F.col("bigMod_sharedComs.community") == F.col("broken_coms_df.community"), how="left"
+        ).withColumn("shared_nodes", F.array_intersect(F.col("bigMod_sharedComs.nodes"), F.col("broken_coms_df.nodes"))).select(
+            "bigMod_sharedComs.community", "shared_nodes", "bigMod_sharedComs.communities"))
+        printTrace("- In shared_coms shared_nodes_of_biggest_comp", shared_nodes_of_biggest_comp)
+
+        # LEFT HERE
+        # Need to adjust modify after removal -> centrality test into accepting a unified dataframe to be used multiple times
+        # shared_nodes_of_biggest_comp has the nodes coms and com
+        # I need to find the neighbors of each node (from above nodes)
+        # and somehow get the current tags for modify after removal
+        exploded_shared_coms = shared_coms.withColumn("affected_node", F.explode(F.col("affected_nodes")))
+        aggregated_shared_coms = (
+            exploded_shared_coms
+            .groupby("affected_node")
+            .agg(F.collect_set("community").alias("communities_from_shared_coms"))
+        )
+        node_of_graph_and_shared_coms = (
+            broken_coms_df.alias("sub")
+            .join(
+                aggregated_shared_coms.alias("expl_nodes"),
+                F.col("sub.id") == F.col("expl_nodes.affected_node"),
+                how="inner"
+            ).select(F.col("sub.id"), F.col("communities_from_shared_coms"))
+        )
+
+
+        modify_after_removal()
+
 
         first_comps_df = broken_coms_df.select(
-            "community", "num_components",
+            "community", "num_nodes",
             F.expr("components[0]").alias("component")
         )
         first_joined_comps = agg_comps.alias("agg_comps").join(first_comps_df.alias("first"),
@@ -1829,6 +1897,8 @@ def destroy_communities(self, communitiesToRemove: DataFrame):
         return
     printMsg("- Destroying communities")
     saved_communities = loadState(self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
+    printTrace("-  communitiesToRemove", communitiesToRemove)
+    printTrace("-  saved_communities", saved_communities)
     updated_communities = saved_communities.alias("saved_communities").join(
             communitiesToRemove.alias("communitiesToRemove"),
             (F.col("communitiesToRemove.community") == F.col("saved_communities.cid")),
@@ -1837,6 +1907,8 @@ def destroy_communities(self, communitiesToRemove: DataFrame):
 
     printTrace("- destroy_communities updated_communities:", updated_communities)
     saveState(updated_communities, self.communities_path)
+    saved_communities = loadState(self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
+    printTrace("- saved_communities after destroying", saved_communities)
     printMsg("- Finished destroying communities")
 
 def modify_after_removal(self, subgraph_edges_df:DataFrame, neighbors_df:DataFrame):
@@ -1849,8 +1921,9 @@ def centrality_test(self, subgraph_edges_df:DataFrame, neighbors_df:DataFrame):
     # Step 1: Extract neighbors for each node in the subgraph
     subgraph_neighbors = (
         subgraph_edges_df.alias("edges")
-        .join(neighbors_df.alias("nbrs"), F.col("edges.src") == F.col("nbrs.node"), "inner")
-        .select(F.col("edges.src").alias("node"), F.col("nbrs.neighbor").alias("neighbor"))
+        .join(neighbors_df.alias("nbrs"), F.col("edges.id") == F.col("nbrs.node"), "inner")
+        # .join(neighbors_df.alias("nbrs"), F.col("edges.src") == F.col("nbrs.node"), "inner")
+        .select(F.col("edges.id").alias("node"), F.col("nbrs.neighbor").alias("neighbor"))
         .union(
             subgraph_edges_df.alias("edges")
             .join(neighbors_df.alias("nbrs"), F.col("edges.dst") == F.col("nbrs.node"), "inner")
@@ -2038,6 +2111,7 @@ def saveState(dataframeToBeSaved: DataFrame, pathToBeSaved: str):
         dataframeToBeSaved.cache()
         dataframeToBeSaved.count()
         dataframeToBeSaved.write.mode("overwrite").format("parquet").save(pathToBeSaved)
+        dataframeToBeSaved.count()
 
         # temp_path = pathToBeSaved + "_temp"
         # # Step 2: Move the temporary directory to the final location
@@ -2053,6 +2127,8 @@ def loadState(self, pathToload: str, schemaToCreate: str = None):
     """
     try:
         loadedDataframe = self.spark.read.format("parquet").load(pathToload)
+        loadedDataframe.cache()
+        loadedDataframe.count()
     except Exception:  # Handle case where file does not exist
         loadedDataframe = self.spark.createDataFrame([], schemaToCreate)
 
