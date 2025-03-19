@@ -1174,199 +1174,39 @@ def add_to_community_streaming(self, all_vertices:DataFrame, new_community_edges
     # return updated_community_tags, updated_communities, updated_vertices
 
 
-
-
-def add_to_community(self, toBeAddedDf: DataFrame):
-    """
-    Adds a node to a community in a streaming-friendly way using DataFrames.
-
-    Args:
-        node (str): Node to be added to the community.
-        community_id (str): ID of the community.
-        tags (str): Tags associated with the community, comma-separated.
-    """
-    src_tags = toBeAddedDf.select(
-        F.col("shared_coms_src").alias("nodeId"),
-        F.explode(F.split(F.col("shared_coms_tags"), ",")).alias("tag"),
-        F.col("community_id")
-    )
-
-    # Explode the tags for shared_coms_dst
-    dst_tags = toBeAddedDf.select(
-        F.col("shared_coms_dst").alias("nodeId"),
-        F.explode(F.split(F.col("shared_coms_tags"), ",")).alias("tag"),
-        F.col("community_id")
-    )
-
-    new_entries = src_tags.union(dst_tags)
-
-    # If communityTagsDf is empty, initialize it; otherwise, append the new entries
-    if self.communityTagsDf is None:
-        self.communityTagsDf = new_entries
-    else:
-        self.communityTagsDf = self.communityTagsDf.union(new_entries)
-
-    # Join communityTagsDf with vertices
-    updated_vertices = self.g.vertices.join(
-        self.communityTagsDf.withColumnRenamed("nodeId", "id"),
-        on="id",
-        how="left"
-    ).withColumn(
-        "c_coms",
-        F.when(
-            F.col("community_id").isNotNull(),  # If there is a community_id to add
-            F.concat(F.col("c_coms"), F.array(F.col("community_id")))  # Append to c_coms array
-        ).otherwise(F.col("c_coms"))  # Keep the original c_coms if no community_id
-    ).drop("community_id", "tag")  # Drop extra columns from join if not needed
-
-    updated_vertices = updated_vertices.withColumn(
-        "c_coms", F.array_distinct(F.col("c_coms"))
-    )
-    # Step 3: Deduplicate and remove redundant entries
-    # updated_vertices = (
-    #     updated_vertices
-    #     .withColumn("c_coms", F.array_distinct(F.col("c_coms")))  # Remove duplicates within c_coms
-    #     .dropDuplicates(["id"])  # Ensure no duplicate rows for the same id
-    # )
-
-    # Update the graph
-    self.g = GraphFrame(updated_vertices, self.g.edges)
-
-def detect_common_neighbors(all_edges: DataFrame, detected_common_neighbors):
-    """
-    Detect common neighbors for edges in the batch using GraphFrames.
-    """
-
-    # Step 1: Extract neighbors for each node in the graph using a simpler approach
-    printMsg("detect_common_neighbors - Before Union")
-
-    neighbors = (
-        all_edges.select(F.col("src").alias("node"), F.col("dst").alias("neighbor"))
-        .union(all_edges.select(F.col("dst").alias("node"), F.col("src").alias("neighbor")))
-        .groupBy("node")
-        .agg(F.collect_list("neighbor").alias("neighbors"))
-    )
-    printMsg("detect_common_neighbors - After Union")
-
-    # Step 2: Join edge_updates with neighbors for both src and dst nodes
-    printMsg("detect_common_neighbors - Before double join")
-    # Step 1: Flatten the neighbors DataFrame
-    src_neighbors = (
-        neighbors.withColumnRenamed("node", "src")
-        .withColumnRenamed("neighbors", "src_neighbors")
-    )
-
-    dst_neighbors = (
-        neighbors.withColumnRenamed("node", "dst")
-        .withColumnRenamed("neighbors", "dst_neighbors")
-    )
-
-    # Step 2: Perform one join with flattened neighbor DataFrames
-    edge_neighbors = detected_common_neighbors.join(src_neighbors, on="src", how="left") \
-        .join(dst_neighbors, on="dst", how="left")
-
-    # edge_neighbors = (
-    #     edge_updates
-    #     .join(neighbors.withColumnRenamed("node", "src"), on="src", how="left")
-    #     .withColumnRenamed("neighbors", "src_neighbors")
-    #     .join(neighbors.withColumnRenamed("node", "dst"), on="dst", how="left")
-    #     .withColumnRenamed("neighbors", "dst_neighbors")
-    # )
-    printMsg("detect_common_neighbors - After double join")
-
-    # Step 3: Compute common neighbors
-    edge_neighbors = edge_neighbors.withColumn(
-        "common_neighbors", F.array_intersect(F.col("src_neighbors"), F.col("dst_neighbors"))
-    )
-
-    # Step 4: Filter edges with common neighbors
-    common_neighbors_filtered = edge_neighbors.filter(
-        F.col("common_neighbors").isNotNull() & (F.size(F.col("common_neighbors")) > 0)
-    )
-    common_neighbors_filtered.select(F.col("dst"), F.col("src"),
-                                     F.col("timestamp"), F.col("tags"),
-                                     F.col("weight"), F.col("common_neighbors"))
-
-    return common_neighbors_filtered.select(F.col("dst"), F.col("src"),
-                                     F.col("timestamp"), F.col("tags"),
-                                     F.col("weight"), F.col("common_neighbors"))
-
 def printMsg(msg):
     print(time.ctime() + " " + msg)
 
-# def detect_common_neighbors(self, edge_updates):
-#     """
-#     Detect common neighbors for edges in the batch using GraphFrames.
-#     """
-#
-#     # TODO Check performance of these, seems slow
-#     # Extract neighbors for each node in the graph
-#     neighbors = self.g.find("(a)-[]->(b)") \
-#         .select(F.col("a.id").alias("node"), F.col("b.id").alias("neighbor")) \
-#         .groupBy("node") \
-#         .agg(F.collect_list("neighbor").alias("neighbors"))
-#
-#     # Join edge_updates with neighbors twice (for src and dst nodes)
-#     edge_neighbors = edge_updates \
-#         .join(neighbors.withColumnRenamed("node", "src"), on="src", how="left") \
-#         .withColumnRenamed("neighbors", "src_neighbors") \
-#         .join(neighbors.withColumnRenamed("node", "dst"), on="dst", how="left") \
-#         .withColumnRenamed("neighbors", "dst_neighbors")
-#
-#     # Compute common neighbors
-#     common_neighbors_df = edge_neighbors.withColumn(
-#         "common_neighbors", F.array_intersect(F.col("src_neighbors"), F.col("dst_neighbors"))
-#     )
-#
-#     # Filter edges with common neighbors
-#     common_neighbors_filtered = common_neighbors_df.filter(
-#         F.col("common_neighbors").isNotNull() & (F.size(F.col("common_neighbors")) > 0)
-#     )
-#
-#     return common_neighbors_filtered
+def common_neighbor_detection_of_nodes(all_edges: DataFrame, dfWithNodesArray: DataFrame):
+    neighbors = all_edges.select(
+        F.col("src").alias("node"),
+        F.col("dst").alias("neighbor")
+    ).union(
+        all_edges.select(
+            F.col("dst").alias("node"),
+            F.col("src").alias("neighbor")
+        )
+    ).distinct()
 
-# def evolution(all_edges: DataFrame, edge_updates: DataFrame):
-#     # Extract neighbors for both source (u) and destination (v)
-#     neighbors = all_edges.select(
-#         F.col("src").alias("node"),
-#         F.col("dst").alias("neighbor")
-#     ).union(
-#         all_edges.select(
-#             F.col("dst").alias("node"),
-#             F.col("src").alias("neighbor")
-#         )
-#     ).distinct()  # Ensure no duplicate (node, neighbor) pairs
-#
-#     # Calculate neighbor counts for all nodes
-#     neighbor_counts = neighbors.groupBy("node").agg(F.count("neighbor").alias("neighbor_count"))
-#
-#     # Filter for nodes with more than one neighbor (u_n and v_n conditions)
-#     valid_neighbors = neighbor_counts.filter(F.col("neighbor_count") > 1).select("node")
-#
-#     # Join edges with valid nodes to ensure u and v both meet the condition
-#     valid_edges = (
-#         edge_updates.alias("valid_edges")
-#         .join(valid_neighbors.alias("valid_u"), F.col("valid_edges.src") == F.col("valid_u.node"))
-#         .join(valid_neighbors.alias("valid_v"), F.col("valid_edges.dst") == F.col("valid_v.node"))
-#         .select("valid_edges.*")  # Only include columns from edge_updates
-#     )
-#
-#     # Find common neighbors for valid (u, v) pairs
-#     common_neighbors = (
-#         valid_edges
-#         .join(neighbors.alias("u_neighbors"), F.col("valid_edges.src") == F.col("u_neighbors.node"), "inner")
-#         .join(neighbors.alias("v_neighbors"), F.col("valid_edges.dst") == F.col("v_neighbors.node"), "inner")
-#         .filter(F.col("u_neighbors.neighbor") == F.col("v_neighbors.neighbor"))
-#         .select(
-#             F.col("valid_edges.src").alias("node_u"),
-#             F.col("valid_edges.dst").alias("node_v"),
-#             F.col("u_neighbors.neighbor").alias("common_neighbor")
-#         )
-#         .groupBy("node_u", "node_v")
-#         .agg(F.collect_set("common_neighbor").alias("common_neighbors"))
-#     )
-#
-#     return common_neighbors
+    # Step 2: Aggregate to get list of neighbors per node
+    node_neighbors = neighbors.groupBy("node") \
+                              .agg(F.collect_set("neighbor").alias("neighbors"))
+
+    # Step 3: Explode shared_nodes to get (node, community) pairs
+    exploded_nodes = dfWithNodesArray.select(
+        F.explode("shared_nodes").alias("node"),
+        "community"
+    )
+
+    # Step 4: Aggregate to get list of communities per node
+    node_communities = exploded_nodes.groupBy("node") \
+                                     .agg(F.collect_set("community").alias("communities"))
+
+    # Step 5: Join communities with their neighbors
+    result = node_communities.join(node_neighbors, "node", "left_outer")
+
+    return result
+
 
 
 def common_neighbor_detection(all_edges: DataFrame, edge_updates: DataFrame):
@@ -1793,6 +1633,16 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
         # shared_nodes_of_biggest_comp has the nodes coms and com
         # I need to find the neighbors of each node (from above nodes)
         # and somehow get the current tags for modify after removal
+        # CHECK if the neighbors method is working, last time something was wrong throwing huge stacktrace
+        # then check central nodes if working and then proceed
+        all_edges = loadState(self=self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
+        neighs_of_biggest_comp = common_neighbor_detection_of_nodes(all_edges, shared_nodes_of_biggest_comp)
+        printTrace("neighs_of_biggest_comp", neighs_of_biggest_comp)
+
+        central_nodes = find_central_nodes(all_edges, neighs_of_biggest_comp)
+        printTrace("central_nodes of biggest components", central_nodes)
+
+
         exploded_shared_coms = shared_coms.withColumn("affected_node", F.explode(F.col("affected_nodes")))
         aggregated_shared_coms = (
             exploded_shared_coms
@@ -1914,6 +1764,41 @@ def destroy_communities(self, communitiesToRemove: DataFrame):
 def modify_after_removal(self, subgraph_edges_df:DataFrame, neighbors_df:DataFrame):
     central_nodes = centrality_test(self, subgraph_edges_df, neighbors_df)
 
+
+def find_central_nodes(all_edges: DataFrame, dfWithNodesArray: DataFrame):
+    neighbors = common_neighbor_detection_of_nodes(all_edges, dfWithNodesArray)
+
+    valid_nodes = neighbors.filter(F.size("neighbors") > 1)
+
+    # Step 2: Create node pairs (u, v) ensuring u > v
+    node_pairs = valid_nodes.alias("u").join(
+        valid_nodes.alias("v"),
+        (F.col("u.node") > F.col("v.node")),
+        "inner"
+    ).select(
+        F.col("u.node").alias("node_u"),
+        F.col("v.node").alias("node_v")
+    )
+
+    # Step 3: Find common neighbors (cn = neighbors_u & neighbors_v)
+    common_neighbors = node_pairs.join(
+        valid_nodes.alias("nu"), F.col("node_u") == F.col("nu.node"), "inner"
+    ).join(
+        valid_nodes.alias("nv"), F.col("node_v") == F.col("nv.node"), "inner"
+    ).select(
+        F.col("node_u"),
+        F.col("node_v"),
+        F.array_intersect("nu.neighbors", "nv.neighbors").alias("common_neighbors")
+    ).filter(F.size("common_neighbors") > 0)
+
+    # Step 4: Collect all central nodes (u, v, and common neighbors)
+    central_nodes = common_neighbors.selectExpr("node_u as central_node").union(
+        common_neighbors.selectExpr("node_v as central_node")
+    ).union(
+        common_neighbors.selectExpr("explode(common_neighbors) as central_node")
+    ).distinct()
+
+    return central_nodes
 
 def centrality_test(self, subgraph_edges_df:DataFrame, neighbors_df:DataFrame):
     if subgraph_edges_df.isEmpty():
