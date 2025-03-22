@@ -225,14 +225,14 @@ class TILES:
         # Only those edges are getting neighbor analyzed
         normalized_new_edges = normalize_edges(new_edges)
         normalized_all_edges = normalize_edges(edges_state)
-        printTrace("normalized_new_edges", normalized_new_edges)
-        printTrace("normalized_all_edges", normalized_all_edges)
+        # printTrace("normalized_new_edges", normalized_new_edges)
+        # printTrace("normalized_all_edges", normalized_all_edges)
         first_edges = normalized_new_edges.join(
             normalized_all_edges,
             on=["src", "dst"],
             how="left_anti"
         ).sort("timestamp")
-        printTrace("first_edges", first_edges)
+        # printTrace("first_edges", first_edges)
         firstTimeEdges = (first_edges.groupBy("src", "dst").agg(
             F.first("timestamp").alias("timestamp"),
             F.first("tags").alias("tags"),
@@ -249,8 +249,8 @@ class TILES:
         # printTrace("new edges: (before evo)", new_edges)
         # printTrace("updated_edges: (before evo)", updated_edges)
         # printTrace("all all_edges: (before evo)", all_edges)
-        printTrace("firstTimeEdges: ", firstTimeEdges)
-        printTrace("all_vertices 1st Loaded (after updated_vertices) : ", all_vertices)
+        # printTrace("firstTimeEdges: ", firstTimeEdges)
+        # printTrace("all_vertices 1st Loaded (after updated_vertices) : ", all_vertices)
 
         # common_neighbors = common_neighbor_detection(updated_edges, firstTimeEdges)
         common_neighbors = common_neighbor_detection(all_edges, firstTimeEdges)
@@ -1195,7 +1195,7 @@ def common_neighbor_detection_of_nodes(all_edges: DataFrame, dfWithNodesArray: D
     # Step 3: Explode shared_nodes to get (node, community) pairs
     exploded_nodes = dfWithNodesArray.select(
         F.explode("shared_nodes").alias("node"),
-        "community"
+        "community", "communities"
     )
 
     # Step 4: Aggregate to get list of communities per node
@@ -1427,6 +1427,7 @@ def remove_edge(self, dfToRemove: DataFrame):
     )
 
     update_shared_coms(self, coms_to_change_df, existing_edges, exploded_neighbors)
+
     # TODO here we should first remove the edges and then execute update_shared_coms
     # printTrace("Updated edges_state after removal(Before save):", filtered_edges_state)
     saveState(filtered_edges_state, self.edges_path)
@@ -1440,9 +1441,10 @@ def remove_edge(self, dfToRemove: DataFrame):
         # Remove from community
 
 def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, common_neighbors_df:DataFrame):
-    if not shared_coms:
-        return
     printMsg("Running update_shared_coms...")
+    if not shared_coms:
+        printMsg("Skipped update_shared_coms")
+        return
 
     printTrace("update_shared_coms shared_coms", shared_coms)
 
@@ -1553,6 +1555,8 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
     broken_coms_df = community_components.filter(F.col("num_components") != 1)
     printTrace("Broken communities broken_coms_df:", broken_coms_df)
 
+    all_node_neighbors = get_all_neighbors(self)
+
     # c_components == 1 -> unbroken community
     if not unbroken_coms_df.isEmpty():
         print("unbroken community")
@@ -1565,7 +1569,7 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
         subGraphVertices: DataFrame = subgraph.vertices
 
         node_of_graph_and_shared_coms = (
-            subGraphVertices.alias("sub")
+            subGraphVertices.alias("sub") # check if i might need existing_edges here
             .join(
                 aggregated_shared_coms.alias("expl_nodes"),
                 F.col("sub.id") == F.col("expl_nodes.affected_node"),
@@ -1573,16 +1577,55 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
             ).select(F.col("sub.id"), F.col("communities_from_shared_coms"))
         )
 
-        modify_after_removal(self, node_of_graph_and_shared_coms, common_neighbors_df)
-    else:
-        # broken community: bigger one maintains the id, the others obtain a new one
-        # agg_comps = (connected_components.groupBy("component").agg(F.collect_set("community").alias("communities"),
-        #                                   F.collect_set("id").alias("nodes"))
-        #              .select("component", "nodes","communities"))
+        printTrace("[shared_coms - unbroken community] node_of_graph_and_shared_coms", node_of_graph_and_shared_coms)
+        ### Centrality Test (start) ###
 
-        # might no longer need agg_comps test this
-        # i need the first biggest comm because networkx conn_comp() returns ordered biggest first
+        ### Neighbor Detection (start) ###
 
+        subNode_neighbors = (node_of_graph_and_shared_coms.withColumnRenamed("id", "node")
+                                    .join(all_node_neighbors, "node", "left_outer"))
+
+        ### Neighbor Detection (end) ###
+
+        valid_nodes = subNode_neighbors.filter(F.size("neighbors") > 1)
+
+        exploded_neigh = valid_nodes.select(F.col("node").alias("TheNode"), F.explode("neighbors").alias("TheNode_neighbor"), F.col("neighbors").alias("TheNode_neighbors"))
+        # printTrace("[shared_coms] neigh detection exploded_neigh1", exploded_neigh)
+
+        exploded_neigh = exploded_neigh.filter(F.col("TheNode") > F.col("TheNode_neighbor"))
+        # printTrace("[shared_coms] neigh detection exploded_neigh2", exploded_neigh)
+
+        neighbors_neighbor = (exploded_neigh.withColumnRenamed("TheNode_neighbor", "node")
+                                    .join(all_node_neighbors, "node", "left_outer"))
+
+        neighbors_neighbor = neighbors_neighbor.withColumnsRenamed({'node': 'TheNode_neighbor', 'neighbors':'neighs_of_neigh'}).select("TheNode", "TheNode_neighbors", "TheNode_neighbor", "neighs_of_neigh")
+
+        # printTrace("[shared_coms] neigh detection neighbors_neighbor", neighbors_neighbor)
+
+        common_neighbors_df = neighbors_neighbor.withColumn(
+            "common_neighbors",
+            F.array_intersect(F.col("TheNode_neighbors"), F.col("neighs_of_neigh"))
+        )
+        common_neighbors_df = common_neighbors_df.filter(F.size("common_neighbors") > 0)
+        printTrace("[shared_coms] common_neighbors_df ", common_neighbors_df)
+
+        exploded_central_nodes = common_neighbors_df.select(
+            F.explode(F.array_union(F.array("TheNode", "TheNode_neighbor"), F.col("common_neighbors"))).alias(
+                "central_node")
+        ).distinct()
+
+        printTrace("[shared_coms] central_nodes of unbroken com", exploded_central_nodes)
+        ### Centrality Test (end)   ###
+
+        ### Modify After Removal (Start)    ###
+
+
+
+        ### Modify After Removal (End)    ###
+        printMsg("Should run modify_after_removal for unbroken_coms_df")
+        # TODO Latest - you have the central nodes, move on here V
+        # modify_after_removal(self, node_of_graph_and_shared_coms, common_neighbors_df)
+    if not broken_coms_df.isEmpty():
         agg_comps = (
             connected_components.groupBy("component")
             .agg(
@@ -1596,34 +1639,16 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
         biggest_component = agg_comps.orderBy(F.desc("num_nodes")).limit(1)
 
         to_destroy_coms = biggest_component.filter(F.expr("size(nodes) < 3"))
-        destroy_communities(self, to_destroy_coms)
-
-        # to_modify_coms_of_biggest_comp = biggest_component.filter(F.expr("size(nodes) > 2"))
-        # to_modify_coms_of_biggest_comp_exploded_coms = to_modify_coms_of_biggest_comp.withColumn("community", F.explode(F.col("communities")))
-        # big_to_modify = (to_modify_coms_of_biggest_comp_exploded_coms.alias("big_to_mod_expl")
-        #                  .join(
-        #                    shared_coms, on=F.col("shared_coms.community") == F.col("big_to_mod_expl.community"), how="inner"
-        #                 ).alias("bigMod_sharedComs")
-        #                 .join(
-        #                     broken_coms_df, on=F.col("bigMod_sharedComs.community") == F.col("broken_coms_df.community"), how="inner"
-        #                 )
-        # )
-
+        destroy_communities(self, to_destroy_coms) # should skip the following code part as in else
 
         to_modify_coms_of_biggest_comp = biggest_component.filter(F.expr("size(nodes) > 2"))
         to_modify_coms_of_biggest_comp_exploded_coms = to_modify_coms_of_biggest_comp.withColumn("community", F.explode(F.col("communities")))
         # printTrace("to_modify_coms_of_biggest_comp_exploded_coms", to_modify_coms_of_biggest_comp_exploded_coms)
 
-        #
         shared_nodes_of_biggest_comp = (to_modify_coms_of_biggest_comp_exploded_coms.alias("big_to_mod_expl")
-                .join(
-            shared_coms.alias("shared_coms"),
-            on=F.col("shared_coms.community") == F.col("big_to_mod_expl.community"), how="inner"
-        ).select("big_to_mod_expl.nodes", "big_to_mod_expl.communities", "big_to_mod_expl.community").alias(
-            "bigMod_sharedComs")
-                .join(
-            broken_coms_df.alias("broken_coms_df"),
-            on=F.col("bigMod_sharedComs.community") == F.col("broken_coms_df.community"), how="left"
+            .join(shared_coms.alias("shared_coms"), on=F.col("shared_coms.community") == F.col("big_to_mod_expl.community"), how="inner"
+        ).select("big_to_mod_expl.nodes", "big_to_mod_expl.communities", "big_to_mod_expl.community").alias("bigMod_sharedComs")
+            .join(broken_coms_df.alias("broken_coms_df"),on=F.col("bigMod_sharedComs.community") == F.col("broken_coms_df.community"), how="left_outer" #check if needs outer here
         ).withColumn("shared_nodes", F.array_intersect(F.col("bigMod_sharedComs.nodes"), F.col("broken_coms_df.nodes"))).select(
             "bigMod_sharedComs.community", "shared_nodes", "bigMod_sharedComs.communities"))
         printTrace("- In shared_coms shared_nodes_of_biggest_comp", shared_nodes_of_biggest_comp)
@@ -1635,101 +1660,150 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
         # and somehow get the current tags for modify after removal
         # CHECK if the neighbors method is working, last time something was wrong throwing huge stacktrace
         # then check central nodes if working and then proceed
-        all_edges = loadState(self=self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
-        neighs_of_biggest_comp = common_neighbor_detection_of_nodes(all_edges, shared_nodes_of_biggest_comp)
-        printTrace("neighs_of_biggest_comp", neighs_of_biggest_comp)
 
-        central_nodes = find_central_nodes(all_edges, neighs_of_biggest_comp)
-        printTrace("central_nodes of biggest components", central_nodes)
+        existing_edges_join_big_comp = (shared_nodes_of_biggest_comp.alias("shared_big")
+                                        .join(subgraph_edges_df.alias("sub_edges"),
+                                              on=F.col("shared_big.community") == F.col("sub_edges.community"), how="inner")
+                                        .select("src", "dst", "tags", "weight", "timestamp", "communities", "shared_big.community", "shared_big.shared_nodes"))
+        printTrace("[shared cms - biggest comp] existing_edges_join_big_comp", existing_edges_join_big_comp)
 
+        ### Centrality Test (start) ###
 
-        exploded_shared_coms = shared_coms.withColumn("affected_node", F.explode(F.col("affected_nodes")))
-        aggregated_shared_coms = (
-            exploded_shared_coms
-            .groupby("affected_node")
-            .agg(F.collect_set("community").alias("communities_from_shared_coms"))
+        ### Neighbor Detection (start) ###
+
+        subNode_neighbors_big = existing_edges_join_big_comp.withColumn("node", F.explode("shared_nodes")).join(all_node_neighbors, "node", "left_outer")
+
+        ### Neighbor Detection (end) ###
+
+        valid_nodes_big = subNode_neighbors_big.filter(F.size("neighbors") > 1)
+
+        exploded_neigh_big = valid_nodes_big.select(F.col("node").alias("TheNode"), F.explode("neighbors").alias("TheNode_neighbor"), F.col("neighbors").alias("TheNode_neighbors"))
+        # printTrace("[shared_coms] neigh detection exploded_neigh1", exploded_neigh)
+
+        exploded_neigh_big = exploded_neigh_big.filter(F.col("TheNode") > F.col("TheNode_neighbor"))
+        # printTrace("[shared_coms] neigh detection exploded_neigh2", exploded_neigh)
+
+        neighbors_neighbor_big = (exploded_neigh_big.withColumnRenamed("TheNode_neighbor", "node")
+                                    .join(all_node_neighbors, "node", "left_outer"))
+
+        neighbors_neighbor_big = neighbors_neighbor_big.withColumnsRenamed({'node': 'TheNode_neighbor', 'neighbors':'neighs_of_neigh'}).select("TheNode", "TheNode_neighbors", "TheNode_neighbor", "neighs_of_neigh")
+
+        # printTrace("[shared_coms] neigh detection neighbors_neighbor", neighbors_neighbor)
+
+        common_neighbors_df_big = neighbors_neighbor_big.withColumn(
+            "common_neighbors",
+            F.array_intersect(F.col("TheNode_neighbors"), F.col("neighs_of_neigh"))
         )
-        node_of_graph_and_shared_coms = (
-            broken_coms_df.alias("sub")
-            .join(
-                aggregated_shared_coms.alias("expl_nodes"),
-                F.col("sub.id") == F.col("expl_nodes.affected_node"),
-                how="inner"
-            ).select(F.col("sub.id"), F.col("communities_from_shared_coms"))
-        )
+        common_neighbors_df_big = common_neighbors_df_big.filter(F.size("common_neighbors") > 0)
+        printTrace("[shared_coms] common_neighbors_df_big ", common_neighbors_df_big)
+
+        exploded_central_nodes_big = common_neighbors_df_big.select(
+            F.explode(F.array_union(F.array("TheNode", "TheNode_neighbor"), F.col("common_neighbors"))).alias(
+                "central_node")
+        ).distinct()
+
+        printTrace("[shared_coms] central_nodes_big of unbroken com", exploded_central_nodes_big)
 
 
-        modify_after_removal()
+        printMsg("Should run modify_after_removal for big comp df")
 
 
-        first_comps_df = broken_coms_df.select(
-            "community", "num_nodes",
-            F.expr("components[0]").alias("component")
-        )
-        first_joined_comps = agg_comps.alias("agg_comps").join(first_comps_df.alias("first"),
-                                                         on=F.col("agg_comps.component") == F.col("first.component"),
-                                                         how="inner")
-        printTrace("first_joined_comps (first node extraction)", first_joined_comps)
+        # all_edges = loadState(self=self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
+        # modify_after_removal(self, all_edges, shared_nodes_of_biggest_comp)
+        # neighs_of_biggest_comp = common_neighbor_detection_of_nodes(all_edges, shared_nodes_of_biggest_comp)
+        # printTrace("neighs_of_biggest_comp", neighs_of_biggest_comp)
 
-
-        to_destroy_coms = first_joined_comps.filter(F.expr("size(nodes) < 3"))
-        to_destroy_coms = to_destroy_coms.withColumn("community", F.explode("communities"))
-
-        first_to_mod_comps = first_joined_comps.filter(F.expr("size(nodes) >= 3"))
-        printTrace("first_to_mod_comps", first_to_mod_comps)
-
-        if not to_destroy_coms.isEmpty():
-            destroy_communities(self, to_destroy_coms)
-        else:
-            exploded_shared_coms = shared_coms.withColumn("affected_node", F.explode(F.col("affected_nodes")))
-
-            aggregated_shared_coms = (exploded_shared_coms.groupby("affected_node")
-                                      .agg(F.collect_set("community").alias("communities_from_shared_coms")))
-
-            printTrace("aggregated_shared_coms", aggregated_shared_coms)
-
-            exploded_first_comps_df = first_to_mod_comps.withColumn("node", F.explode("nodes"))
-            nodes_for_modify = aggregated_shared_coms.join(
-                exploded_first_comps_df, F.col("node") == F.col("affected_node"),
-                "inner"
-            ).select("community", "node").distinct()
-
-            printTrace("nodes_for_modify", nodes_for_modify)
-            modify_after_removal(self, nodes_for_modify, common_neighbors_df)
-
-
-        agg_comps = (connected_components.groupBy("component").agg(F.collect_set("community").alias("communities"),
-                                                                   F.collect_set("id").alias("nodes"))
-                     .select("component", "nodes", "communities"))
-        exploded_broken_coms_df = broken_coms_df.withColumn("component", F.explode("components"))
-
-        joined_comps = agg_comps.alias("agg_comps").join(exploded_broken_coms_df.alias("broken"),
-                                                         on=F.col("agg_comps.component") == F.col("broken.component"),
-                                                         how="inner")
-        # TODO Check this next time, we dont need components but the above aggregated with the nodes
-        except_first_comp = joined_comps.select(
-            "community", "num_components",
-            F.expr("slice(components, 2, size(components) - 1)").alias("remaining_nodes")  # Keep all except first
-        )
-        remaining_comps = except_first_comp.filter(F.expr("size(remaining_nodes) > 3"))
-        # remaining_comps = remaining_comps.withColumn("remaining_node", F.explode(F.col("remaining_nodes")))
-
-        exploded_shared_coms = shared_coms.withColumn("affected_node", F.explode(F.col("affected_nodes")))
-
-        aggregated_shared_coms = (exploded_shared_coms.groupby("affected_node")
-                                  .agg(F.collect_set("community").alias("communities_from_shared_coms")))
-
-        # printTrace("exploded_shared_coms", exploded_shared_coms)
-        nodes_for_modify = aggregated_shared_coms.join(
-            remaining_comps, F.col("remaining_node") == F.col("affected_node"),
-            "inner"
-        ).select("community", "affected_node").distinct()
-
-        printTrace("nodes_for_modify", nodes_for_modify)
-
-        # TODO check the neighbors, need to detect via the given nodes_for_modify
-        central = centrality_test(self, nodes_for_modify, common_neighbors_df)
-        printTrace("inside update_shared_coms - central", central)
+        # central_nodes = find_central_nodes(all_edges, neighs_of_biggest_comp)
+        # printTrace("central_nodes of biggest components", central_nodes)
+        #
+        #
+        # exploded_shared_coms = shared_coms.withColumn("affected_node", F.explode(F.col("affected_nodes")))
+        # aggregated_shared_coms = (
+        #     exploded_shared_coms
+        #     .groupby("affected_node")
+        #     .agg(F.collect_set("community").alias("communities_from_shared_coms"))
+        # )
+        # node_of_graph_and_shared_coms = (
+        #     broken_coms_df.alias("sub")
+        #     .join(
+        #         aggregated_shared_coms.alias("expl_nodes"),
+        #         F.col("sub.id") == F.col("expl_nodes.affected_node"),
+        #         how="inner"
+        #     ).select(F.col("sub.id"), F.col("communities_from_shared_coms"))
+        # )
+        #
+        #
+        # modify_after_removal()
+        #
+        #
+        # first_comps_df = broken_coms_df.select(
+        #     "community", "num_nodes",
+        #     F.expr("components[0]").alias("component")
+        # )
+        # first_joined_comps = agg_comps.alias("agg_comps").join(first_comps_df.alias("first"),
+        #                                                  on=F.col("agg_comps.component") == F.col("first.component"),
+        #                                                  how="inner")
+        # printTrace("first_joined_comps (first node extraction)", first_joined_comps)
+        #
+        #
+        # to_destroy_coms = first_joined_comps.filter(F.expr("size(nodes) < 3"))
+        # to_destroy_coms = to_destroy_coms.withColumn("community", F.explode("communities"))
+        #
+        # first_to_mod_comps = first_joined_comps.filter(F.expr("size(nodes) >= 3"))
+        # printTrace("first_to_mod_comps", first_to_mod_comps)
+        #
+        # if not to_destroy_coms.isEmpty():
+        #     destroy_communities(self, to_destroy_coms)
+        # else:
+        #     exploded_shared_coms = shared_coms.withColumn("affected_node", F.explode(F.col("affected_nodes")))
+        #
+        #     aggregated_shared_coms = (exploded_shared_coms.groupby("affected_node")
+        #                               .agg(F.collect_set("community").alias("communities_from_shared_coms")))
+        #
+        #     printTrace("aggregated_shared_coms", aggregated_shared_coms)
+        #
+        #     exploded_first_comps_df = first_to_mod_comps.withColumn("node", F.explode("nodes"))
+        #     nodes_for_modify = aggregated_shared_coms.join(
+        #         exploded_first_comps_df, F.col("node") == F.col("affected_node"),
+        #         "inner"
+        #     ).select("community", "node").distinct()
+        #
+        #     printTrace("nodes_for_modify", nodes_for_modify)
+        #     modify_after_removal(self, nodes_for_modify, common_neighbors_df)
+        #
+        #
+        # agg_comps = (connected_components.groupBy("component").agg(F.collect_set("community").alias("communities"),
+        #                                                            F.collect_set("id").alias("nodes"))
+        #              .select("component", "nodes", "communities"))
+        # exploded_broken_coms_df = broken_coms_df.withColumn("component", F.explode("components"))
+        #
+        # joined_comps = agg_comps.alias("agg_comps").join(exploded_broken_coms_df.alias("broken"),
+        #                                                  on=F.col("agg_comps.component") == F.col("broken.component"),
+        #                                                  how="inner")
+        #
+        # except_first_comp = joined_comps.select(
+        #     "community", "num_components",
+        #     F.expr("slice(components, 2, size(components) - 1)").alias("remaining_nodes")  # Keep all except first
+        # )
+        # remaining_comps = except_first_comp.filter(F.expr("size(remaining_nodes) > 3"))
+        # # remaining_comps = remaining_comps.withColumn("remaining_node", F.explode(F.col("remaining_nodes")))
+        #
+        # exploded_shared_coms = shared_coms.withColumn("affected_node", F.explode(F.col("affected_nodes")))
+        #
+        # aggregated_shared_coms = (exploded_shared_coms.groupby("affected_node")
+        #                           .agg(F.collect_set("community").alias("communities_from_shared_coms")))
+        #
+        # # printTrace("exploded_shared_coms", exploded_shared_coms)
+        # nodes_for_modify = aggregated_shared_coms.join(
+        #     remaining_comps, F.col("remaining_node") == F.col("affected_node"),
+        #     "inner"
+        # ).select("community", "affected_node").distinct()
+        #
+        # printTrace("nodes_for_modify", nodes_for_modify)
+        #
+        #
+        # central = centrality_test(self, nodes_for_modify, common_neighbors_df)
+        # printTrace("inside update_shared_coms - central", central)
 
 
     # TODO
@@ -1741,6 +1815,24 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, co
     # exploded_components_broken_coms = broken_coms_df.withColumn("exploded_components", F.explode(F.col("components")))
 
 
+def get_all_neighbors(self):
+    all_edges = loadState(self=self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
+
+    neighbors = all_edges.select(
+        F.col("src").alias("node"),
+        F.col("dst").alias("neighbor")
+    ).union(
+        all_edges.select(
+            F.col("dst").alias("node"),
+            F.col("src").alias("neighbor")
+        )
+    ).distinct()
+
+    # Step 2: Aggregate to get list of neighbors per node
+    node_neighbors = neighbors.groupBy("node") \
+        .agg(F.collect_set("neighbor").alias("neighbors"))
+
+    return node_neighbors
 
 def destroy_communities(self, communitiesToRemove: DataFrame):
     if communitiesToRemove.isEmpty():
@@ -1761,8 +1853,13 @@ def destroy_communities(self, communitiesToRemove: DataFrame):
     printTrace("- saved_communities after destroying", saved_communities)
     printMsg("- Finished destroying communities")
 
-def modify_after_removal(self, subgraph_edges_df:DataFrame, neighbors_df:DataFrame):
-    central_nodes = centrality_test(self, subgraph_edges_df, neighbors_df)
+def modify_after_removal(self, central_nodes, sub_Nodes, sub_edges):
+    print("[modify_after_removal] started processing")
+
+# def modify_after_removal(self, subgraph_edges_df:DataFrame, dfWithNodesArray:DataFrame):
+#     # all_edges = loadState(self=self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
+#     central_nodes = find_central_nodes(subgraph_edges_df, dfWithNodesArray)
+#     printTrace(" - in mod_after_removal central_nodes", central_nodes)
 
 
 def find_central_nodes(all_edges: DataFrame, dfWithNodesArray: DataFrame):
@@ -1996,7 +2093,7 @@ def saveState(dataframeToBeSaved: DataFrame, pathToBeSaved: str):
         dataframeToBeSaved.cache()
         dataframeToBeSaved.count()
         dataframeToBeSaved.write.mode("overwrite").format("parquet").save(pathToBeSaved)
-        dataframeToBeSaved.count()
+        # dataframeToBeSaved.count()
 
         # temp_path = pathToBeSaved + "_temp"
         # # Step 2: Move the temporary directory to the final location
