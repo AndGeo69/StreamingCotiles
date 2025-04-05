@@ -1,10 +1,11 @@
+import os
 import socket
 import time
 from math import trunc
 
 
 # Acts as a server, streaming the txt file content to an open socket
-def send_file_over_socket(file_path, host='localhost', port=9999, delay=0.5):
+def send_file_over_socket(file_path, host='localhost', port=9999, delay=0.3):
     # Create a socket object
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((host, port))
@@ -61,6 +62,9 @@ def send_file_over_socket(file_path, host='localhost', port=9999, delay=0.5):
 
 
 if __name__ == "__main__":
-    file_path = "/home/bigdata/PycharmProjects/SparkStreamingCotiles/spark/NetworkSegmentETiles30.txt"
+    basePath = os.getcwd()
+    # file_path = "/home/bigdata/PycharmProjects/SparkStreamingCotiles/spark/NetworkSegmentETiles30.txt"
+    # file_path = "/home/bigdata/PycharmProjects/SparkStreamingCotiles/spark/Small_NetworkData.txt"
+    file_path = f"{basePath}/Small_NetworkData2.txt"
     # file_path = "/home/bigdata/master/MEDES/NetworkSegment_small.txt" smaller file for testing
     send_file_over_socket(file_path)
