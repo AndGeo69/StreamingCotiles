@@ -1,12 +1,7 @@
-import subprocess
-import subprocess
-import sys
+import os
 import time
 
-from pyspark.sql import functions as F
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import explode, split, col, from_csv
-from pyspark.sql.types import StructType, StructField, StringType
 
 from spark.applied.TILES import TILES
 
@@ -19,13 +14,16 @@ def create_streaming_session():
             # Initialize SparkSession
             spark = (SparkSession.builder.appName("StreamingCOTILES")
                      .config("spark.jars.packages","graphframes:graphframes:0.8.3-spark3.4-s_2.12")
-            .config("spark.sql.shuffle.partitions", "2")
-            .config("spark.executor.memory", "4g")
-            .config("spark.driver.memory", "4g")
-                     .getOrCreate())
+            .config("spark.sql.shuffle.partitions", "1")
+            .config("spark.executor.memory", "7g")
+            .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+            .config("spark.driver.memory", "7g").getOrCreate())
+
             spark.conf.set("spark.streaming.backpressure.enabled", "true")
 
-            spark.sparkContext.setCheckpointDir("/home/bigdata/PycharmProjects/SparkStreamingCotiles/checkpoint")
+            basePath = os.getcwd()
+            spark.sparkContext.setCheckpointDir(f"{basePath}/checkpoint")
+            spark.sparkContext.setLogLevel("error")
             # spark.sparkContext.setLogLevel("TRACE")
 
             # Enabled by properties file located in /home/bigdata/spark/conf    spark-defaults.cond
@@ -50,12 +48,11 @@ def create_streaming_session():
             streamingDF.printSchema()
 
             print("streamingDF IsStreaming: " + streamingDF.isStreaming.__str__())
-
-            tiles_instance.clear_directory(directory_path="/home/bigdata/PycharmProjects/SparkStreamingCotiles/checkpoint")
+            tiles_instance.clear_directory(directory_path=f"{basePath}/checkpoint")
             # In the writeStream:
             (streamingDF.writeStream.foreachBatch(tiles_instance.execute)
                         .outputMode("append")
-                        .option("checkpointLocation", "/home/bigdata/PycharmProjects/SparkStreamingCotiles/checkpoint")
+                        # .option("checkpointLocation", f"{basePath}/checkpoint")
                         .trigger(processingTime="5 seconds")
                         .start()
                         .awaitTermination())
@@ -67,108 +64,7 @@ def create_streaming_session():
             time.sleep(1)
 
 
-    def run_tiles_algorithm(mode, obs, ttl, path, filename):
-        try:
-            process = subprocess.Popen([
-                sys.executable, '/home/bigdata/PycharmProjects/StreamingCotiles/__main__.py',
-                filename,
-                '-m', mode,
-                '-o', str(obs),
-                '-t', str(ttl),
-                '-p', path
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
 
-            for line in process.stdout:
-                print(line, end="")  # Output the stdout to the console in real-time
-
-            process.wait()
-
-            for line in process.stderr:
-                print(f"Error: {line}", end="")
-
-            if process.returncode != 0:
-                print(f"COTILES algorithm failed with exit code {process.returncode}")
-            else:
-                print("COTILES algorithm finished successfully.")
-
-        except Exception as e:
-            print(f"Error running the COTILES algorithm: {e}")
-
-    # Set the mode for running the algorithm (TTL or Explicit)
-    mode = 'Explicit'  # Or 'TTL'
-    obs = 7            # Observation window in days
-    ttl = 5            # Time-to-live for edges
-    path = 'results'   # Directory to store output results (adjust as needed)
-
-    # Instead of saving the DataFrame, just call the COTILES algorithm
-    # run_tiles_algorithm(mode, obs, ttl, path, input_file)
-
-    # dont stop when dealing with streaming data
-    # spark.stop()
 
 if __name__ == "__main__":
     create_streaming_session()
-
-# streamingDF = (streamingDataFrame
-# .withColumn("fields", F.split(F.col("value"), "\\t"))
-# .select(
-#     F.col("fields")[0].alias("action"),
-#     F.col("fields")[1].cast("int").alias("nodeU"),
-#     F.col("fields")[2].cast("int").alias("nodeV"),
-#     F.col("fields")[3].cast("int").alias("timestamp"),
-#     F.split(F.col("fields")[4], ",").alias("tags")
-# )
-# )
-# Split and process words
-# words = streamingDataFrame.select(explode(split(streamingDataFrame.value, '\t')).alias('word'))
-
-# Count words
-# wordCounts = words.groupBy('word').count()
-
-# Start streaming query
-# query = wordCounts.writeStream.outputMode('complete').format('console').trigger(processingTime='1 second').start()
-
-# schema = StructType([
-#     StructField("action", StringType(), True),
-#     StructField("nodeU", StringType(), True),
-#     StructField("nodeV", StringType(), True),
-#     StructField("timestamp", StringType(), True),
-#     StructField("tags", StringType(), True)
-# ]) # User defined schema not supported by TextSocketProvider - Keeping this to apply on kafka stream
-
-
- # schema = "action STRING, nodeU INT, nodeV INT, timestamp INT, tags STRING"
-            # streamingDF = (streamingDataFrame
-            #                .select(from_csv(col("value"), schema, {"delimiter": "\t"}).alias("data"))
-            #                .select("data.*")
-            #                .withColumn("tags", split(col("tags"), ",")))
-
-            # Efficient Column Splitting and Transformation
-            # split_col = split(col("value"), "\t")
-            # tags_split = split(split_col.getItem(4), ",")
-
-            # streamingDF = (streamingDataFrame
-            #                .withColumn("action", split_col.getItem(0))
-            #                .withColumn("nodeU", col("value").substr(0, 10).cast("int"))  # Extract and cast nodeU
-            #                .withColumn("nodeV", col("value").substr(11, 20).cast("int"))  # Extract and cast nodeV
-            #                .withColumn("timestamp",
-            #                            col("value").substr(21, 31).cast("int"))  # Extract and cast timestamp
-            #                .withColumn("tags", tags_split)  # Split the tags into an array
-            #                )
-
-# query = streamingDF.writeStream.outputMode("append").format("console").trigger(processingTime='5 second').start()
-
-
-# Await termination
-# query.awaitTermination()
-
-
-# streamingDF = (streamingDataFrame.selectExpr(
-#     "split(value, '\t')[0] as action",
-#     "split(value, '\t')[1] as nodeU",
-#     "split(value, '\t')[2] as nodeV",
-#     "split(value, '\t')[3] as timestamp",
-#     "split(value, '\t')[4] as tags"
-# ).withColumn("nodeU", col("nodeU").cast("int"))
-# .withColumn("nodeV", col("nodeV").cast("int"))
-# .withColumn("timestamp", col("timestamp").cast("int")))
