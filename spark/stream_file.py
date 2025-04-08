@@ -1,6 +1,7 @@
 import os
 import socket
 import time
+import argparse
 from math import trunc
 
 
@@ -54,17 +55,22 @@ def send_file_over_socket(file_path, host='localhost', port=9999, delay=0.3):
         except Exception as e:
             print(f"Error: {e}")
 
-    # finally:
-    #     # Close the sockets
-    #     client_socket.close()
-    #     server_socket.close()
-    #     print("Connection closed.")
-
 
 if __name__ == "__main__":
     basePath = os.getcwd()
+    file_path = f"{basePath}/Small_NetworkData2.txt"
+
+    parser = argparse.ArgumentParser(description="Send a file over a socket.")
+    parser.add_argument("--file_path", type=str, default=file_path, help="Path to the file to be sent over the socket.")
+    parser.add_argument("--host", type=str, default="localhost", help="Host to bind the server (default: localhost).")
+    parser.add_argument("--port", type=int, default=9999, help="Port to bind the server (default: 9999).")
+
     # file_path = "/home/bigdata/PycharmProjects/SparkStreamingCotiles/spark/NetworkSegmentETiles30.txt"
     # file_path = "/home/bigdata/PycharmProjects/SparkStreamingCotiles/spark/Small_NetworkData.txt"
-    file_path = f"{basePath}/Small_NetworkData2.txt"
-    # file_path = "/home/bigdata/master/MEDES/NetworkSegment_small.txt" smaller file for testing
-    send_file_over_socket(file_path)
+    # file_path = "/home/bigdata/master/MEDES/NetworkSegment_small.txt"
+
+    # Parse the arguments
+    args = parser.parse_args()
+
+    # Call the function with the parsed arguments
+    send_file_over_socket(file_path=args.file_path, host=args.host, port=args.port)

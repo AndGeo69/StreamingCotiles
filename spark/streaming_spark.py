@@ -1,23 +1,24 @@
 import os
 import time
+import argparse
 
 from pyspark.sql import SparkSession
 
-from spark.applied.TILES import TILES
+from applied.TILES import TILES
 
 
 # Acts as the client, connecting to an open socket ready to receive data and process it
-def create_streaming_session():
-    global spark
+def create_streaming_session(host='localhost', port=9999):
+    # global spark
     while True:
         try:
             # Initialize SparkSession
             spark = (SparkSession.builder.appName("StreamingCOTILES")
                      .config("spark.jars.packages","graphframes:graphframes:0.8.3-spark3.4-s_2.12")
-            .config("spark.sql.shuffle.partitions", "1")
-            .config("spark.executor.memory", "8g")
+            .config("spark.sql.shuffle.partitions", "3")
+            .config("spark.executor.memory", "7g")
             .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-            .config("spark.driver.memory", "8g").getOrCreate())
+            .config("spark.driver.memory", "7g").getOrCreate())
 
             spark.conf.set("spark.streaming.backpressure.enabled", "true")
 
@@ -27,7 +28,7 @@ def create_streaming_session():
             # spark.sparkContext.setLogLevel("TRACE")
 
             # Enabled by properties file located in /home/bigdata/spark/conf    spark-defaults.cond
-            streamingDataFrame = spark.readStream.format('socket').option('host', 'localhost').option('port', '9999').load()
+            streamingDataFrame = spark.readStream.format('socket').option('host', host).option('port', port).load()
             streamingDF = (streamingDataFrame.selectExpr(
                 "split(value, '\\t')[0] as action",
                 "cast(split(value, '\\t')[1] as int) as nodeU",
@@ -67,4 +68,9 @@ def create_streaming_session():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Start COTILES streaming algorithm.")
+
+    parser.add_argument("--host", type=str, default="localhost", help="Host to listen the streaming data (default: localhost).")
+    parser.add_argument("--port", type=int, default=9999, help="Port to too listen the streaming data (default: 9999).")
+
     create_streaming_session()

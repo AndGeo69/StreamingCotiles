@@ -1,3 +1,4 @@
+#!/usr/bin/python3.10
 import datetime
 import os
 import shutil
@@ -9,7 +10,7 @@ from click.core import batch
 from graphframes import GraphFrame
 from pyspark.sql import functions as F, Window
 from pyspark.sql.functions import min
-from pyspark.sql.types import StructType, StringType, StructField, ArrayType, IntegerType
+from pyspark.sql.types import StructType, StringType, StructField, ArrayType, IntegerType, LongType
 
 if sys.version_info > (2, 7):
     pass
@@ -68,7 +69,7 @@ class TILES:
             StructField("dst", StringType(), True),
             StructField("timestamp", IntegerType(), True),
             StructField("tags", ArrayType(StringType()), True),
-            StructField("weight", IntegerType(), True)
+            StructField("weight", LongType(), True)
         ])
 
         self.communities_schema = StructType([
@@ -107,6 +108,14 @@ class TILES:
             os.makedirs(directory_path)
 
     def execute(self, batch_df: DataFrame, batch_id):
+        try:
+            self.executeImpl(batch_df, batch_id)
+            self.spark.catalog.clearCache()
+        except Exception as e:
+            print("[Error] Something went wrong:")
+            print(e)
+
+    def executeImpl(self, batch_df: DataFrame, batch_id):
         """
         Execute TILES algorithm on streaming data using foreachBatch.
         """
@@ -144,7 +153,7 @@ class TILES:
                 printMsg(f"~ NEW actual_time = {self.actual_time}")
 
         batch_df = batch_df.drop("gap", "dif", "dt")
-        printTrace("batch_df", batch_df)
+        printMsg("New batch arrived...")
         to_remove_df = batch_df.filter(F.col("action") == "-").select(F.col("nodeU").alias("src"),
                                                                       F.col("nodeV").alias("dst"),
                                                                       F.col("timestamp"),
@@ -158,12 +167,12 @@ class TILES:
         communityTagsDf = loadState(self=self, pathToload=self.communityTags_path, schemaToCreate=self.communityTags_schema)
         communitiesDf = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
 
-        printMsg("Loaded State:")
-        printTrace("[State] saved_vertices", saved_vertices)
-        printTrace("[State] saved_edges", saved_edges)
-        printTrace("[State] communityTagsDf", communityTagsDf)
-        printTrace("[State] communitiesDf", communitiesDf)
-        printMsg("Starting processing batch after loaded state:")
+        # printMsg("Loaded State:")
+        # printTrace("[State] saved_vertices", saved_vertices)
+        # printTrace("[State] saved_edges", saved_edges)
+        # printTrace("[State] communityTagsDf", communityTagsDf)
+        # printTrace("[State] communitiesDf", communitiesDf)
+        # printMsg("Starting processing batch after loaded state:")
 
         saved_edges, saved_vertices, communityTagsDf, communitiesDf = remove_edge(self, dfToRemove=to_remove_df.filter(F.col("nodeU") != F.col("nodeV")),
                     saved_edges=saved_edges, saved_vertices=saved_vertices, saved_communities=communitiesDf, saved_communityTags=communityTagsDf)
@@ -186,8 +195,8 @@ class TILES:
 
         # state might have been modified due to remove_edge
         vertices_state, edges_state = saved_vertices, saved_edges
-        printTrace("[new state] vertices_state", vertices_state)
-        printTrace("[new state]  edges_state", edges_state)
+        # printTrace("[new state] vertices_state", vertices_state)
+        # printTrace("[new state]  edges_state", edges_state)
 
         edges_state = normalize_edges(edges_state)
 
@@ -199,34 +208,12 @@ class TILES:
 
         # Update state
         updated_vertices = vertices_state.unionByName(new_nodes_filtered).dropDuplicates(subset=["id"])
-        printTrace("updated_vertices after 1st union", updated_vertices)
+        # printTrace("updated_vertices after 1st union", updated_vertices)
 
 
-        # combined_edges = updated_edges.unionByName(edges_state)
-        # printTrace("combined_edges (after union, before deduplication)", combined_edges)
-        #
-        # deduplicated_edges = combined_edges.dropDuplicates(subset=["src", "dst"])
-        # printTrace("deduplicated_edges (after dropDuplicates)", deduplicated_edges)
-
-        # updated_edges = updated_edges.unionByName(edges_state).dropDuplicates(subset=["src", "dst"])
-        # printTrace("updated_edges (before save state)", updated_edges)
-
-        # printTrace("updated_vertices (before save)", updated_vertices)
-        # printTrace("updated_edges (before save)", updated_edges)
-        # printTrace("firstTimeEdges (before save)", firstTimeEdges)
-        # Persist updated state back to storage
-
-        # saveStateVerticesAndEdges(self, updated_vertices, updated_edges)
-
-        # printTrace("updated_vertices (after save)", updated_vertices)
-        # printTrace("updated_edges (after save)", updated_edges)
-
-        # Detect edges that are getting processed for the first time
-        # Only those edges are getting neighbor analyzed
         normalized_new_edges = normalize_edges(new_edges)
         normalized_all_edges = normalize_edges(edges_state)
-        # printTrace("normalized_new_edges", normalized_new_edges)
-        # printTrace("normalized_all_edges", normalized_all_edges)
+
         firstTimeEdges = normalized_new_edges.join(
             normalized_all_edges,
             on=["src", "dst"],
@@ -236,46 +223,16 @@ class TILES:
             F.first("tags").alias("tags"),
             F.first("weight").alias("weight")
         ).sort("timestamp")
-        # printTrace("first_edges", first_edges)
-        # firstTimeEdges = (first_edges.groupBy("src", "dst").agg(
-        #     F.first("timestamp").alias("timestamp"),
-        #     F.first("tags").alias("tags"),
-        #     F.first("weight").alias("weight")
-        # ).sort("timestamp"))
-        # printTrace("firstTimeEdges (after save)", firstTimeEdges)
 
-        # Reload updated state from Parquet to ensure it includes all persisted data
-        # all_vertices, all_edges = loadStateVerticesAndEdges(self)
+
 
         all_vertices, all_edges = updated_vertices, updated_edges
 
-        # printTrace("new edges: (before evo)", new_edges)
-        # printTrace("updated_edges: (before evo)", updated_edges)
-        # printTrace("all all_edges: (before evo)", all_edges)
-        # printTrace("firstTimeEdges: ", firstTimeEdges)
-        # printTrace("all_vertices 1st Loaded (after updated_vertices) : ", all_vertices)
-
         # common_neighbors = common_neighbor_detection(updated_edges, firstTimeEdges)
-        printMsg("Starting detecting common neighbros")
+        printMsg("Starting detecting common neighbors")
         common_neighbors = common_neighbor_detection(all_edges, firstTimeEdges)
         printTrace("Common_neighbors: ", common_neighbors)
-        # print(f"all_vertices count BEFORE saving/loading: {all_vertices.count()}")
-        # print(f"all_edges count BEFORE saving/loading: {all_edges.count()}")
 
-
-        # test saving in last step VV
-        # saveStateVerticesAndEdges(self, updated_vertices, updated_edges)
-        # all_vertices, all_edges = loadStateVerticesAndEdges(self)
-        # printTrace("all_vertices AFTER neighbors detection loaded", all_vertices)
-        # printTrace("all_vertices AFTER neighbors detection: ", all_vertices)
-        # printTrace("all_edges AFTER neighbors detection loaded: ", all_edges)
-        # printTrace("Common_neighbors AFTER Saving/Loading ", common_neighbors)
-
-        # common_neighbors = detect_common_neighbors(all_edges, new_edges)
-        # printMsg(" After detect_common_neighbors")
-        # printTrace("Common Neighbors:", common_neighbors)
-
-        # common_neighbors_analysis(self, all_vertices, common_neighbors)
 
         propagated_edges, new_community_edges = None, None
 
@@ -286,19 +243,7 @@ class TILES:
         communityTagsDf, communitiesDf, all_vertices = add_community_neighbors(self, exploded_neighbors, exploded_only_u_communities, exploded_only_v_communities,
                                 exploded_shared_coms_communities, all_vertices, communitiesDf, communityTagsDf)
 
-        # printTrace("propagated_edges", propagated_edges)
-        # printTrace("new_community_edges", new_community_edges)
 
-
-        # if new_community_edges is not None:
-        #     communitiesDf = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
-        #     communityTagsDf = loadState(self=self, pathToload=self.communityTags_path, schemaToCreate=self.communityTags_schema)
-        #
-        #     updated_community_tags, updated_communities, updated_vertices = add_to_community_streaming(all_vertices, new_community_edges, communitiesDf, communityTagsDf)
-        #
-            # saveState(updated_community_tags, self.communityTags_path)
-            # saveState(updated_communities, self.communities_path)
-            # saveState(updated_vertices, self.vertices_path)
         all_vertices, all_edges, updated_communitiesDf, communityTagsDf =  (
             print_coms(self, all_edges, all_vertices, communitiesDf, communityTagsDf, batch_id))
 
@@ -307,6 +252,11 @@ class TILES:
         saveState(communitiesDf, self.communities_path)
         saveState(all_vertices, self.vertices_path)
         saveState(all_edges, self.edges_path)
+
+        all_vertices.unpersist()
+        all_edges.unpersist()
+        updated_communitiesDf.unpersist()
+        communityTagsDf.unpersist()
 
 
 
@@ -333,14 +283,14 @@ def add_community_neighbors(self, exploded_neighbors: DataFrame, exploded_only_u
     if exploded_neighbors is None or exploded_neighbors.isEmpty():
         return communityTagsDf, communitiesDf, all_vertices
 
-    exploded_neighbors.cache()
-    exploded_neighbors.count()
-    exploded_only_u_communities.cache()
-    exploded_only_u_communities.count()
-    exploded_only_v_communities.cache()
-    exploded_only_v_communities.count()
-    exploded_shared_coms_communities.cache()
-    exploded_shared_coms_communities.count()
+    # exploded_neighbors.cache()
+    # exploded_neighbors.count()
+    # exploded_only_u_communities.cache()
+    # exploded_only_u_communities.count()
+    # exploded_only_v_communities.cache()
+    # exploded_only_v_communities.count()
+    # exploded_shared_coms_communities.cache()
+    # exploded_shared_coms_communities.count()
 
     # all_vertices.cache()
     # all_vertices.count()
@@ -533,7 +483,7 @@ def print_coms(self, edgesDf:DataFrame, all_vertices: DataFrame, communitiesDf: 
     communities_with_sorted_nodes = valid_size_communities.withColumn(
         "sorted_nodes_key", F.array_sort(F.col("nodes"))
     )
-    # Convert array to string for grouping (safer than grouping by array directly sometimes)
+    # Convert array to string for grouping
     # Use a delimiter that won't appear in node IDs
     communities_with_sorted_nodes = communities_with_sorted_nodes.withColumn(
         "sorted_nodes_str", F.concat_ws("||", F.col("sorted_nodes_key"))
@@ -552,9 +502,9 @@ def print_coms(self, edgesDf:DataFrame, all_vertices: DataFrame, communitiesDf: 
     unique_communities_df = communities_with_min_cid.filter(F.col("cid") == F.col("kept_cid")) \
         .select(
         F.col("cid").alias("final_cid"),
-        F.col("nodes"),  # Keep original node order for output consistency if needed, or use sorted_nodes_key
-        "sorted_nodes_key"  # Needed for joining later if original nodes aren't unique key
-    ).distinct()  # Distinct needed in case the original communitiesDf had exact duplicates (same cid, same nodes)
+        F.col("nodes"),
+        "sorted_nodes_key"
+    ).distinct()
     printTrace(f"[Batch {batch_id}] Unique communities identified", unique_communities_df)
 
     # Identify communities that will be merged away (cid != kept_cid)
@@ -576,7 +526,6 @@ def print_coms(self, edgesDf:DataFrame, all_vertices: DataFrame, communitiesDf: 
     )
 
     # Add tag counts (approximating the Python logic)
-    # Note: Replicating Counter().most_common() exactly without UDFs is complex.
     # This calculates unique tag count and total tag occurrences.
     output_communities_with_counts = output_communities_intermediate \
         .withColumn("unique_tag_count",
@@ -666,7 +615,7 @@ def print_coms(self, edgesDf:DataFrame, all_vertices: DataFrame, communitiesDf: 
 
     ids_to_remove_df = ids_merged_away.unionByName(ids_too_small).distinct()
     printTrace(f"[Batch {batch_id}] Combined list of CIDs to remove", ids_to_remove_df)
-    removed_count = ids_to_remove_df.count()  # Action to see count
+    removed_count = ids_to_remove_df.count()
     printMsg(f"[Batch {batch_id}] Total communities to remove (small or merged): {removed_count}")
 
     # --- 6. Update State DataFrames ---
@@ -753,199 +702,6 @@ def analyze_common_neighbors(self, common_neighbors: DataFrame, all_vertices: Da
     return exploded_only_u_communities, exploded_only_v_communities, exploded_shared_coms_communities, exploded_neighbors
 
 
-
-def common_neighbors_analysis(self, all_vertices: DataFrame, common_neighbors: DataFrame):
-    """
-    Analyze and update communities for nodes with common neighbors in a streaming manner.
-
-    :param common_neighbors: DataFrame with columns ["src", "dst", "common_neighbors"]
-    """
-    if common_neighbors.isEmpty():
-        return
-
-    common_neighbors = common_neighbors.withColumnsRenamed({'node_u':'src', 'node_v':'dst'})
-
-    # Step 1: Filter out null common_neighbors and explode to one row per common_neighbor
-    common_neighbors = (
-        common_neighbors
-        .filter(F.col("common_neighbors").isNotNull())
-        .withColumn("common_neighbor", F.explode(F.col("common_neighbors")))
-    )
-
-    printTrace("common_neighbors: ", common_neighbors)
-
-    # Step 2: Reshape common_neighbors for a single join (avoiding double join)
-    common_neighbors_reshaped = (
-        common_neighbors
-        .select(
-            F.col("src").alias("node_id"),
-            F.col("dst").alias("other_node_id"),
-            F.col("tags"),
-            F.col("timestamp"),
-            F.col("weight"),
-            F.col("common_neighbors")
-        )
-        .union(
-            common_neighbors
-            .select(
-                F.col("dst").alias("node_id"),
-                F.col("src").alias("other_node_id"),
-                F.col("tags"),
-                F.col("timestamp"),
-                F.col("weight"),
-                F.col("common_neighbors")
-            )
-        )
-    )
-
-    # Rename node_id and other_node_id back to src and dst for later use
-    common_neighbors_reshaped = (
-        common_neighbors_reshaped
-        .withColumnRenamed("node_id", "src")
-        .withColumnRenamed("other_node_id", "dst")
-    )
-
-    printTrace("common_neighbors_reshaped: ", common_neighbors_reshaped)
-
-    # Step 3: Join with vertices DataFrame once
-    # Perform the join once and get community information for both src and dst
-    shared_coms = (
-        common_neighbors_reshaped
-        .join(all_vertices, (F.col("src") == F.col("id")) | (F.col("dst") == F.col("id")), how="left")
-        .select(
-            F.col("src"),
-            F.col("dst"),
-            F.col("timestamp"),
-            F.col("tags"),
-            F.col("weight"),
-            F.col("common_neighbors"),
-            F.when(F.col("src") == F.col("id"), F.col("c_coms")).alias("src_coms"),
-            F.when(F.col("dst") == F.col("id"), F.col("c_coms")).alias("dst_coms")
-        )
-    )
-
-    printTrace("shared_coms: ", shared_coms)
-
-    # printMsg("common_neighbors_analysis: AFTER single join with vertices")
-    # # Step 1: Filter out null common_neighbors and explode to one row per common_neighbor
-    # common_neighbors = (
-    #     common_neighbors
-    #     .filter(F.col("common_neighbors").isNotNull())
-    #     .withColumn("common_neighbor", F.explode(F.col("common_neighbors")))
-    # )
-    #
-    # print(time.ctime() + "common_neighbors_analysis: BEFORE common_neighbors double join w/ vertices")
-    # # Step 2: Join with `self.g.vertices` to get community information for src and dst
-    # vertices = self.g.vertices.select("id", "c_coms")
-    # shared_coms = (
-    #     common_neighbors
-    #     .join(vertices.alias("vertices_u"), F.col("src") == F.col("vertices_u.id"), how="left")
-    #     .join(vertices.alias("vertices_v"), F.col("dst") == F.col("vertices_v.id"), how="left")
-    #     .select(
-    #         F.col("src"),
-    #         F.col("dst"),
-    #         F.col("timestamp"),
-    #         F.col("tags"),
-    #         F.col("weight"),
-    #         F.col("common_neighbors"),
-    #         F.col("vertices_u.c_coms").alias("src_coms"),
-    #         F.col("vertices_v.c_coms").alias("dst_coms")
-    #     )
-    # )
-    # printMsg("common_neighbors_analysis: AFTER common_neighbors double join w/ vertices")
-
-
-    printMsg("common_neighbors_analysis: BEFORE intersecting")
-    # Step 3: Compute derived columns - shared_coms, only_u, and only_v
-    shared_coms = (
-        shared_coms
-        .withColumn("shared_coms", F.array_intersect(F.col("src_coms"), F.col("dst_coms")))
-        .withColumn("only_u", F.array_except(F.col("src_coms"), F.col("dst_coms")))
-        .withColumn("only_v", F.array_except(F.col("dst_coms"), F.col("src_coms")))
-    )
-
-    printTrace("shared_coms After intersecting arrays : ", shared_coms)
-
-    # Step 4: Rename and reselect columns in the final DataFrame
-    shared_coms = (
-        shared_coms
-        .select(
-            F.col("src").alias("shared_coms_src"),
-            F.col("dst").alias("shared_coms_dst"),
-            F.col("timestamp"),
-            F.col("tags").alias("shared_coms_tags"),
-            F.col("weight"),
-            F.col("common_neighbors"),
-            F.col("src_coms"),
-            F.col("dst_coms"),
-            F.col("shared_coms"),
-            F.col("only_u"),
-            F.col("only_v")
-        )
-    )
-
-    # Propagate 'src' logic: Propagate src if 'common_neighbor' is in 'only_v'
-    propagated = shared_coms.withColumn(
-        "propagated",
-        F.when(
-            F.expr(
-                "size(array_intersect(common_neighbors, only_v)) > 0 OR"
-                " size(array_intersect(common_neighbors, only_u)) > 0"),
-            True
-        ).otherwise(False)
-    )
-
-    #  TODO check common_neighbors list might need an exploded one
-
-    printTrace("propagated: ", propagated)
-    # printTrace("propagated", propagated)
-
-    propagated = propagated.withColumn("community_id", F.monotonically_increasing_id())
-
-    # printTrace("new_communities(propagated)", propagated)
-
-    printMsg("common_neighbors_analysis: BEFORE shared_coms nodesToBeAddedToCom = expression ")
-
-    nodesToBeAddedToCom = (propagated.filter("propagated = false")
-                               .select(
-                                    F.col("shared_coms_src"),
-                                    F.col("shared_coms_dst"),
-                                    F.col("timestamp"),
-                                    F.col("shared_coms_tags"),
-                                    F.col("community_id"),
-                            )
-                           )
-    prexistingCommunities = (propagated.filter("propagated = true")
-                                .select(
-                                    F.col("shared_coms_src"),
-                                    F.col("shared_coms_dst"),
-                                    F.col("timestamp"),
-                                    F.col("shared_coms_tags"),
-                                    F.col("community_id"),
-                                )
-                            )
-
-    printTrace("node propagted FASLE", nodesToBeAddedToCom)
-    printTrace("node propagted TRUE", prexistingCommunities)
-
-    # printMsg(" BEFORE add to community") # TODO Handle prexistingCommunities !!
-    # print("nodesToBeAddedToCom:")
-    # print(nodesToBeAddedToCom.show())
-
-    # add_to_community(self, nodesToBeAddedToCom)
-    # printMsg(" AFTER add to community")
-    # print("nodesToBeAddedToCom:")
-    # print(prexistingCommunities.show())
-
-
-    # if prexistingCommunities is not None:
-    #     printTrace("prexistingCommunities", prexistingCommunities)
-
-    # Step 4: Handle new communities if no propagation occurs TODO this
-    # new_communities = common_neighbors_exploded.join(
-    #     shared_coms, on=["src", "dst"], how="left_anti"
-    # ).withColumn("community_id", F.monotonically_increasing_id())
-
 def add_to_community_streaming(self, all_vertices:DataFrame, new_community_edges:DataFrame, communitiesDf:DataFrame, communityTagsDf:DataFrame):
     """
     Args:
@@ -957,7 +713,12 @@ def add_to_community_streaming(self, all_vertices:DataFrame, new_community_edges
     Returns:
         Updated communitiesDf and communityTagsDf as DataFrames
     """
+    printMsg("Adding to community streaming...")
+    new_community_edges.cache()
+    new_community_edges.count()
+
     if new_community_edges.isEmpty():
+        new_community_edges.unpersist()
         return communityTagsDf, communitiesDf, all_vertices
     printMsg("Merging community tags and communities ...")
     # communitiesDf = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
@@ -965,8 +726,6 @@ def add_to_community_streaming(self, all_vertices:DataFrame, new_community_edges
 
     printTrace("[add] new_community_edges: ", new_community_edges)
 
-    new_community_edges.cache()
-    new_community_edges.count()
     # Step 1: Process and aggregate tags by new_community_id
     new_tags = (
         new_community_edges
@@ -1077,13 +836,14 @@ def add_to_community_streaming(self, all_vertices:DataFrame, new_community_edges
 
     printMsg("  Saved state of merged community tags and communities ...")
     updated_community_tags.cache()
-    updated_community_tags.count()
+    # updated_community_tags.count()
 
     updated_communities.cache()
-    updated_communities.count()
+    # updated_communities.count()
 
     updated_vertices.cache()
-    updated_vertices.count()
+    # updated_vertices.count()
+
 
     return updated_community_tags, updated_communities, updated_vertices
     # print("Following 3 DFs after inside add() was added AFTER added")
@@ -1221,11 +981,6 @@ def remove_edge(self, dfToRemove: DataFrame, saved_edges: DataFrame, saved_verti
     exploded_only_u_communities, exploded_only_v_communities, exploded_shared_coms_communities, exploded_neighbors = \
         analyze_common_neighbors(self, common_neighbors, all_vertices)
 
-    # printTrace("remove_edge: exploded_only_u_communities ", exploded_only_u_communities)
-    # printTrace("remove_edge: exploded_only_v_communities ", exploded_only_v_communities)
-    # printTrace("remove_edge: exploded_shared_coms_communities ", exploded_shared_coms_communities)
-    # printTrace("remove_edge: exploded_neighbors ", exploded_neighbors)
-
     coms_to_change_df = None
 
     if moreThanOneCommonNeighbor:
@@ -1237,10 +992,11 @@ def remove_edge(self, dfToRemove: DataFrame, saved_edges: DataFrame, saved_verti
             )
             # printTrace("[remove_edge] shared_coms_df ", shared_coms_df)
 
-            neighbors_df = exploded_neighbors.select(
-                F.explode(F.col("common_neighbors")).alias("common_neighbor"),
-                F.explode(F.col("neighbor_communities")).alias("community")
-            )
+            neighbors_df = exploded_neighbors.withColumn(
+                "common_neighbor", F.explode(F.col("common_neighbors"))
+            ).withColumn(
+                "community", F.explode(F.col("neighbor_communities"))
+            ).select("common_neighbor", "community")
 
             # printTrace("[remove_edge] neighbors_df ", neighbors_df)
 
@@ -1269,35 +1025,6 @@ def remove_edge(self, dfToRemove: DataFrame, saved_edges: DataFrame, saved_verti
                 .withColumn("affected_nodes", F.array_union(F.col("affected_nodes"), F.col("common_neighbors_set")))
                 .select("community", "affected_nodes")
             )
-
-            # coms_to_change_df = (
-            #     shared_coms_df
-            #     .select("community", "node_u", "node_v")
-            #     .union(
-            #         neighbors_df.withColumnRenamed("common_neighbor", "node_u")
-            #         .withColumn("node_v", F.lit(None).cast(StringType()))
-            #         .select("community", "node_u", "node_v")
-            #     )
-            #     .union(
-            #         neighbors_df.withColumnRenamed("common_neighbor", "node_v")
-            #         .withColumn("node_u", F.lit(None).cast(StringType()))
-            #         .select("community", "node_u", "node_v")
-            #     )
-            #     .withColumn("node_u", F.col("node_u").cast(StringType()))
-            #     .withColumn("node_v", F.col("node_v").cast(StringType()))
-            #     .groupby("community")
-            #     .agg(
-            #         F.collect_set("node_u").alias("affected_nodes_u"),
-            #         F.collect_set("node_v").alias("affected_nodes_v")
-            #     )
-            #     .withColumn(
-            #         "affected_nodes",
-            #         F.array_union(F.col("affected_nodes_u"), F.col("affected_nodes_v"))
-            #     )
-            #     .drop("affected_nodes_u", "affected_nodes_v")
-            # )
-
-            # printTrace("coms_to_change_df", coms_to_change_df)
     else:
         removeFromComDfU = exploded_only_u_communities.filter(F.expr("size(common_u_neighbor) < 2"))
         removeFromComDfV = exploded_only_v_communities.filter(F.expr("size(common_v_neighbor) < 2"))
@@ -1306,28 +1033,16 @@ def remove_edge(self, dfToRemove: DataFrame, saved_edges: DataFrame, saved_verti
 
     # Remove edge
     edges_state = saved_edges
-    # edges_state = loadState(self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
     filtered_edges_state = edges_state.join(
         existing_edges,
         on=["src", "dst"],
-        how="left_anti"  # Keep only edges that do not match existing_edges
+        how="left_anti"
     )
 
     all_vertices, saved_communityTags, saved_communities = update_shared_coms(self, coms_to_change_df, existing_edges, saved_edges=saved_edges, saved_vertices=all_vertices,
                        communityTagsDf=saved_communityTags, saved_communities=saved_communities)
 
     return filtered_edges_state, all_vertices, saved_communityTags, saved_communities
-    # TODO here we should first remove the edges and then execute update_shared_coms
-    # printTrace("Updated edges_state after removal(Before save):", filtered_edges_state)
-    # saveState(filtered_edges_state, self.edges_path)
-
-    # edges_state_latest = loadState(self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
-    # edges_test = edges_state_latest
-    # printTrace("remove_edge, edges_state_latest(After load):", edges_test)
-
-
-    printMsg("end of remove edge")
-        # Remove from community
 
 def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, saved_edges: DataFrame, saved_vertices: DataFrame, communityTagsDf: DataFrame, saved_communities: DataFrame):
     printMsg("Running update_shared_coms...")
@@ -1351,7 +1066,6 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, sa
     preexisting_coms_alias = preexisting_coms.alias("pre")
     saved_communities_alias = saved_communities.alias("saved")
 
-
     printTrace("[update_shared_coms] preexisting_coms_alias", preexisting_coms_alias)
 
     # Perform a left join using explicit aliases
@@ -1373,7 +1087,7 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, sa
 
     filtered_coms_df = updated_coms_df.filter(F.expr("size(nodes) > 3"))
 
-    to_destroy_coms = updated_coms_df.filter(F.expr("size(nodes) < 3"))
+    to_destroy_coms = updated_coms_df.filter(F.expr("size(nodes) <= 3"))
     saved_communities = destroy_communities(self, to_destroy_coms, saved_communities=saved_communities)
 
     exploded_coms_df = filtered_coms_df.withColumn("node", F.explode(F.col("nodes"))).select("community", "node")
@@ -1407,10 +1121,10 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, sa
 
     vertices_df = node_communities_df.withColumnRenamed("node", "id")
 
-    vertices_df.cache()
-    vertices_df.count()
-    subgraph_edges_df_agg.cache()
-    subgraph_edges_df_agg.count()
+    # vertices_df.cache()
+    # vertices_df.count()
+    # subgraph_edges_df_agg.cache()
+    # subgraph_edges_df_agg.count()
 
     subgraph = GraphFrame(vertices_df, subgraph_edges_df_agg)
 
@@ -1429,7 +1143,8 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, sa
             "inner"
         )
         .select(F.col("ec.community"), F.col("cc.id"), F.col("cc.component"), F.col("node"))
-    ).cache()
+    )
+    # ).cache()
 
     community_components = (
         connected_components.groupBy("community")
@@ -1438,7 +1153,8 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, sa
             F.collect_set("component").alias("components"),
             F.collect_set("id").alias("nodes")
         )
-    ).cache()
+    )
+    # ).cache()
 
     unbroken_coms_df = community_components.filter(F.col("num_components") == 1)
     printTrace("Unbroken communities unbroken_coms_df:", unbroken_coms_df)
@@ -1467,7 +1183,7 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, sa
         )
 
         node_of_graph_and_shared_coms = (
-        subGraphVertices.alias("sub")  # check if i might need existing_edges here
+        subGraphVertices.alias("sub")
             .join(
                 aggregated_shared_coms.alias("expl_nodes"),
                 F.col("sub.id") == F.col("expl_nodes.affected_node"),
@@ -1486,7 +1202,7 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, sa
         ### Neighbor Detection (start) ###
 
         subNode_neighbors = (node_of_graph_and_shared_coms.withColumnRenamed("id", "node")
-                                    .join(all_node_neighbors, "node", "left_outer")) # CHECK IF THIS OUTER IS WORKING AS EXPECTED
+                                    .join(all_node_neighbors, "node", "left_outer"))
 
         ### Neighbor Detection (end) ###
 
@@ -1501,7 +1217,10 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, sa
         neighbors_neighbor = (exploded_neigh.withColumnRenamed("TheNode_neighbor", "node")
                                     .join(all_node_neighbors, "node", "left_outer"))
 
-        neighbors_neighbor = neighbors_neighbor.withColumnsRenamed({'node': 'TheNode_neighbor', 'neighbors':'neighs_of_neigh'}).select("TheNode", "TheNode_neighbors", "TheNode_neighbor", "neighs_of_neigh")
+        neighbors_neighbor = neighbors_neighbor \
+            .withColumnRenamed('node', 'TheNode_neighbor') \
+            .withColumnRenamed('neighbors', 'neighs_of_neigh') \
+            .select("TheNode", "TheNode_neighbors", "TheNode_neighbor", "neighs_of_neigh")
 
         # printTrace("[shared_coms] neigh detection neighbors_neighbor", neighbors_neighbor)
 
@@ -1588,14 +1307,6 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, sa
             "bigMod_sharedComs.community", "shared_nodes", "bigMod_sharedComs.communities"))
         # printTrace("- In shared_coms shared_nodes_of_biggest_comp", shared_nodes_of_biggest_comp)
 
-        # LEFT HERE
-        # Need to adjust modify after removal -> centrality test into accepting a unified dataframe to be used multiple times
-        # shared_nodes_of_biggest_comp has the nodes coms and com
-        # I need to find the neighbors of each node (from above nodes)
-        # and somehow get the current tags for modify after removal
-        # CHECK if the neighbors method is working, last time something was wrong throwing huge stacktrace
-        # then check central nodes if working and then proceed
-
         existing_edges_join_big_comp = (shared_nodes_of_biggest_comp.alias("shared_big")
                                         .join(subgraph_edges_df.alias("sub_edges"),
                                               on=F.col("shared_big.community") == F.col("sub_edges.community"),
@@ -1623,7 +1334,10 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, sa
         neighbors_neighbor_big = (exploded_neigh_big.withColumnRenamed("TheNode_neighbor", "node")
                                     .join(all_node_neighbors, "node", "left_outer"))
 
-        neighbors_neighbor_big = neighbors_neighbor_big.withColumnsRenamed({'node': 'TheNode_neighbor', 'neighbors':'neighs_of_neigh'}).select("TheNode", "TheNode_neighbors", "TheNode_neighbor", "neighs_of_neigh")
+        neighbors_neighbor_big = neighbors_neighbor_big \
+            .withColumnRenamed('node', 'TheNode_neighbor') \
+            .withColumnRenamed('neighbors', 'neighs_of_neigh') \
+            .select("TheNode", "TheNode_neighbors", "TheNode_neighbor", "neighs_of_neigh")
 
         # printTrace("[shared_coms] neigh detection neighbors_neighbor", neighbors_neighbor)
 
@@ -1718,9 +1432,10 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, sa
         neighbors_neighbor_other = (exploded_neigh_other.withColumnRenamed("TheNode_neighbor", "node")
                                   .join(all_node_neighbors, "node", "left_outer"))
 
-        neighbors_neighbor_other = neighbors_neighbor_other.withColumnsRenamed(
-            {'node': 'TheNode_neighbor', 'neighbors': 'neighs_of_neigh'}).select("TheNode", "TheNode_neighbors",
-                                                                                 "TheNode_neighbor", "neighs_of_neigh")
+        neighbors_neighbor_other = neighbors_neighbor_other \
+            .withColumnRenamed('node', 'TheNode_neighbor') \
+            .withColumnRenamed('neighbors', 'neighs_of_neigh') \
+            .select("TheNode", "TheNode_neighbors", "TheNode_neighbor", "neighs_of_neigh")
 
         # printTrace("[shared_coms] neigh detection neighbors_neighbor", neighbors_neighbor)
 
@@ -1750,155 +1465,27 @@ def update_shared_coms(self, shared_coms:DataFrame, existing_edges:DataFrame, sa
             create_com_central_other.alias("expl_central"),F.col("node_of_graph.id") == F.col("expl_central.central_node"), "inner")
             ).withColumnRenamed("communities_from_unbroken", "community").withColumn("new_community_id", F.expr("uuid()"))
 
+        printMsg("[shared cms - other comp] before add to com")
+        central_nodes_other_full = central_nodes_other_full.withColumn("node_u", F.col("id")).withColumn("node_v", F.col("id")).withColumn("common_neighbors", F.array(F.col("id")))
         communityTagsDf, saved_communities, saved_vertices = (
             add_to_community_streaming(self, saved_vertices, central_nodes_other_full, saved_communities, communityTagsDf))
-        # if not destroy_com_central_other.isEmpty():
-        #     saved_communities = destroy_communities(self, existing_edges_join_other_comp,
-        #                                             saved_communities=saved_communities)
-        #
-
-        # not_central_nodes_other = (existing_edges_join_other_comp_central.alias("node_of_graph").join(
-        #     exploded_central_nodes_other.alias("expl_central"),
-        #     F.col("node_of_graph.id") == F.col("expl_central.central_node"), "left_anti")
-        #                          ).withColumnRenamed("communities_from_unbroken", "community")
-        #
-        # printTrace("[shared_coms] not_central_nodes_big", not_central_nodes_other)
-        #
-        # saved_vertices, communityTagsDf, saved_communities = remove_from_community(self, not_central_nodes_other,
-        #                                                                            saved_vertices=saved_vertices,
-        #                                                                            communityTagsDf=communityTagsDf,
-        #                                                                            communitiesDf=saved_communities,
-        #                                                                            isCentralDf=True)
+        printMsg("[shared cms - other comp] after add to com")
 
         # printTrace("[shared_coms] central_nodes_big of unbroken com", exploded_central_nodes_big)
         ### Centrality Test (end) ###
 
-
+        shared_coms.unpersist()
+        existing_edges.unpersist()
+        updated_coms_df.unpersist()
+        vertices_df.unpersist()
+        subgraph_edges_df_agg.unpersist()
+        connected_components.unpersist()
+        community_components.unpersist()
 
         return saved_vertices, communityTagsDf, saved_communities
 
-        printMsg("Should run modify_after_removal for big comp df")
-
-
-        # all_edges = loadState(self=self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
-        # modify_after_removal(self, all_edges, shared_nodes_of_biggest_comp)
-        # neighs_of_biggest_comp = common_neighbor_detection_of_nodes(all_edges, shared_nodes_of_biggest_comp)
-        # printTrace("neighs_of_biggest_comp", neighs_of_biggest_comp)
-
-        # central_nodes = find_central_nodes(all_edges, neighs_of_biggest_comp)
-        # printTrace("central_nodes of biggest components", central_nodes)
-        #
-        #
-        # exploded_shared_coms = shared_coms.withColumn("affected_node", F.explode(F.col("affected_nodes")))
-        # aggregated_shared_coms = (
-        #     exploded_shared_coms
-        #     .groupby("affected_node")
-        #     .agg(F.collect_set("community").alias("communities_from_shared_coms"))
-        # )
-        # node_of_graph_and_shared_coms = (
-        #     broken_coms_df.alias("sub")
-        #     .join(
-        #         aggregated_shared_coms.alias("expl_nodes"),
-        #         F.col("sub.id") == F.col("expl_nodes.affected_node"),
-        #         how="inner"
-        #     ).select(F.col("sub.id"), F.col("communities_from_shared_coms"))
-        # )
-        #
-        #
-        # modify_after_removal()
-        #
-        #
-        # first_comps_df = broken_coms_df.select(
-        #     "community", "num_nodes",
-        #     F.expr("components[0]").alias("component")
-        # )
-        # first_joined_comps = agg_comps.alias("agg_comps").join(first_comps_df.alias("first"),
-        #                                                  on=F.col("agg_comps.component") == F.col("first.component"),
-        #                                                  how="inner")
-        # printTrace("first_joined_comps (first node extraction)", first_joined_comps)
-        #
-        #
-        # to_destroy_coms = first_joined_comps.filter(F.expr("size(nodes) < 3"))
-        # to_destroy_coms = to_destroy_coms.withColumn("community", F.explode("communities"))
-        #
-        # first_to_mod_comps = first_joined_comps.filter(F.expr("size(nodes) >= 3"))
-        # printTrace("first_to_mod_comps", first_to_mod_comps)
-        #
-        # if not to_destroy_coms.isEmpty():
-        #     destroy_communities(self, to_destroy_coms)
-        # else:
-        #     exploded_shared_coms = shared_coms.withColumn("affected_node", F.explode(F.col("affected_nodes")))
-        #
-        #     aggregated_shared_coms = (exploded_shared_coms.groupby("affected_node")
-        #                               .agg(F.collect_set("community").alias("communities_from_shared_coms")))
-        #
-        #     printTrace("aggregated_shared_coms", aggregated_shared_coms)
-        #
-        #     exploded_first_comps_df = first_to_mod_comps.withColumn("node", F.explode("nodes"))
-        #     nodes_for_modify = aggregated_shared_coms.join(
-        #         exploded_first_comps_df, F.col("node") == F.col("affected_node"),
-        #         "inner"
-        #     ).select("community", "node").distinct()
-        #
-        #     printTrace("nodes_for_modify", nodes_for_modify)
-        #     modify_after_removal(self, nodes_for_modify, common_neighbors_df)
-        #
-        #
-        # agg_comps = (connected_components.groupBy("component").agg(F.collect_set("community").alias("communities"),
-        #                                                            F.collect_set("id").alias("nodes"))
-        #              .select("component", "nodes", "communities"))
-        # exploded_broken_coms_df = broken_coms_df.withColumn("component", F.explode("components"))
-        #
-        # joined_comps = agg_comps.alias("agg_comps").join(exploded_broken_coms_df.alias("broken"),
-        #                                                  on=F.col("agg_comps.component") == F.col("broken.component"),
-        #                                                  how="inner")
-        #
-        # except_first_comp = joined_comps.select(
-        #     "community", "num_components",
-        #     F.expr("slice(components, 2, size(components) - 1)").alias("remaining_nodes")  # Keep all except first
-        # )
-        # remaining_comps = except_first_comp.filter(F.expr("size(remaining_nodes) > 3"))
-        # # remaining_comps = remaining_comps.withColumn("remaining_node", F.explode(F.col("remaining_nodes")))
-        #
-        # exploded_shared_coms = shared_coms.withColumn("affected_node", F.explode(F.col("affected_nodes")))
-        #
-        # aggregated_shared_coms = (exploded_shared_coms.groupby("affected_node")
-        #                           .agg(F.collect_set("community").alias("communities_from_shared_coms")))
-        #
-        # # printTrace("exploded_shared_coms", exploded_shared_coms)
-        # nodes_for_modify = aggregated_shared_coms.join(
-        #     remaining_comps, F.col("remaining_node") == F.col("affected_node"),
-        #     "inner"
-        # ).select("community", "affected_node").distinct()
-        #
-        # printTrace("nodes_for_modify", nodes_for_modify)
-        #
-        #
-        # central = centrality_test(self, nodes_for_modify, common_neighbors_df)
-        # printTrace("inside update_shared_coms - central", central)
-
-
-    # TODO
-    # before exploding, perhaps check for 'len(com) < 3' logic to destroy community
-    # need to also check if shared_coms are actually correct cuz i see many duplicate 'affected_nodes'
-    # then figure oute the modify_after_removal logic
-    # try avoid graphframe if possible, too much performance degradation
-
-    # exploded_components_broken_coms = broken_coms_df.withColumn("exploded_components", F.explode(F.col("components")))
-
 
 def get_all_neighbors(self, all_edges: DataFrame):
-    # all_edges = loadState(self=self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
-
-    # neighbors = all_edges.select(
-    #     F.col("src").alias("node"),
-    #     F.col("dst").alias("neighbor")
-    # ).union(
-    #     all_edges.select(
-    #         F.col("dst").alias("node"),
-    #         F.col("src").alias("neighbor")
-    #     )
-    # ).distinct()
     neighbors = (
         all_edges.select(F.explode(F.array(F.struct(F.col("src").alias("node"), F.col("dst").alias("neighbor")),
                                            F.struct(F.col("dst").alias("node"), F.col("src").alias("neighbor")))))
@@ -1906,7 +1493,6 @@ def get_all_neighbors(self, all_edges: DataFrame):
         .distinct()
     )
 
-    # Step 2: Aggregate to get list of neighbors per node
     node_neighbors = neighbors.groupBy("node").agg(F.collect_set("neighbor").alias("neighbors"))
 
     return node_neighbors
@@ -1925,89 +1511,77 @@ def destroy_communities(self, communitiesToRemove: DataFrame, saved_communities:
         )
 
     printTrace("- destroy_communities updated_communities:", updated_communities)
-    # saveState(updated_communities, self.communities_path)
-    # saved_communities = loadState(self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
-    # printTrace("- saved_communities after destroying", saved_communities)
     printMsg("- Finished destroying communities")
     return updated_communities
 
-def modify_after_removal(self, central_nodes, sub_Nodes, sub_edges):
-    print("[modify_after_removal] started processing")
-
-# def modify_after_removal(self, subgraph_edges_df:DataFrame, dfWithNodesArray:DataFrame):
-#     # all_edges = loadState(self=self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
-#     central_nodes = find_central_nodes(subgraph_edges_df, dfWithNodesArray)
-#     printTrace(" - in mod_after_removal central_nodes", central_nodes)
-
-
-def find_central_nodes(all_edges: DataFrame, dfWithNodesArray: DataFrame):
-    neighbors = common_neighbor_detection_of_nodes(all_edges, dfWithNodesArray)
-
-    valid_nodes = neighbors.filter(F.size("neighbors") > 1)
-
-    # Step 2: Create node pairs (u, v) ensuring u > v
-    node_pairs = valid_nodes.alias("u").join(
-        valid_nodes.alias("v"),
-        (F.col("u.node") > F.col("v.node")),
-        "inner"
-    ).select(
-        F.col("u.node").alias("node_u"),
-        F.col("v.node").alias("node_v")
-    )
-
-    # Step 3: Find common neighbors (cn = neighbors_u & neighbors_v)
-    common_neighbors = node_pairs.join(
-        valid_nodes.alias("nu"), F.col("node_u") == F.col("nu.node"), "inner"
-    ).join(
-        valid_nodes.alias("nv"), F.col("node_v") == F.col("nv.node"), "inner"
-    ).select(
-        F.col("node_u"),
-        F.col("node_v"),
-        F.array_intersect("nu.neighbors", "nv.neighbors").alias("common_neighbors")
-    ).filter(F.size("common_neighbors") > 0)
-
-    # Step 4: Collect all central nodes (u, v, and common neighbors)
-    central_nodes = common_neighbors.selectExpr("node_u as central_node").union(
-        common_neighbors.selectExpr("node_v as central_node")
-    ).union(
-        common_neighbors.selectExpr("explode(common_neighbors) as central_node")
-    ).distinct()
-
-    return central_nodes
-
-def centrality_test(self, subgraph_edges_df:DataFrame, neighbors_df:DataFrame):
-    if subgraph_edges_df.isEmpty():
-        return subgraph_edges_df
-    # Step 1: Extract neighbors for each node in the subgraph
-    subgraph_neighbors = (
-        subgraph_edges_df.alias("edges")
-        .join(neighbors_df.alias("nbrs"), F.col("edges.id") == F.col("nbrs.node"), "inner")
-        # .join(neighbors_df.alias("nbrs"), F.col("edges.src") == F.col("nbrs.node"), "inner")
-        .select(F.col("edges.id").alias("node"), F.col("nbrs.neighbor").alias("neighbor"))
-        .union(
-            subgraph_edges_df.alias("edges")
-            .join(neighbors_df.alias("nbrs"), F.col("edges.dst") == F.col("nbrs.node"), "inner")
-            .select(F.col("edges.dst").alias("node"), F.col("nbrs.neighbor").alias("neighbor"))
-        )
-    )
-
-    # Step 2: Find shared neighbors (cn = neighbors_u & neighbors_v)
-    common_neighbors_df = (
-        subgraph_neighbors.alias("n1")
-        .join(subgraph_neighbors.alias("n2"),
-              (F.col("n1.neighbor") == F.col("n2.neighbor")) & (F.col("n1.node") > F.col("n2.node")),
-              "inner")
-        .select(F.col("n1.node").alias("u"), F.col("n2.node").alias("v"), F.col("n1.neighbor").alias("common_neighbor"))
-    )
-
-    # Step 3: Extract central nodes (u, v, and cn)
-    central_nodes_df = (
-        common_neighbors_df
-        .select("u").union(common_neighbors_df.select("v")).union(common_neighbors_df.select("common_neighbor"))
-        .distinct()
-    )
-    printTrace("central_nodes_df", central_nodes_df)
-    return central_nodes_df
+# def find_central_nodes(all_edges: DataFrame, dfWithNodesArray: DataFrame):
+#     neighbors = common_neighbor_detection_of_nodes(all_edges, dfWithNodesArray)
+#
+#     valid_nodes = neighbors.filter(F.size("neighbors") > 1)
+#
+#     # Step 2: Create node pairs (u, v) ensuring u > v
+#     node_pairs = valid_nodes.alias("u").join(
+#         valid_nodes.alias("v"),
+#         (F.col("u.node") > F.col("v.node")),
+#         "inner"
+#     ).select(
+#         F.col("u.node").alias("node_u"),
+#         F.col("v.node").alias("node_v")
+#     )
+#
+#     # Step 3: Find common neighbors (cn = neighbors_u & neighbors_v)
+#     common_neighbors = node_pairs.join(
+#         valid_nodes.alias("nu"), F.col("node_u") == F.col("nu.node"), "inner"
+#     ).join(
+#         valid_nodes.alias("nv"), F.col("node_v") == F.col("nv.node"), "inner"
+#     ).select(
+#         F.col("node_u"),
+#         F.col("node_v"),
+#         F.array_intersect("nu.neighbors", "nv.neighbors").alias("common_neighbors")
+#     ).filter(F.size("common_neighbors") > 0)
+#
+#     # Step 4: Collect all central nodes (u, v, and common neighbors)
+#     central_nodes = common_neighbors.selectExpr("node_u as central_node").union(
+#         common_neighbors.selectExpr("node_v as central_node")
+#     ).union(
+#         common_neighbors.selectExpr("explode(common_neighbors) as central_node")
+#     ).distinct()
+#
+#     return central_nodes
+#
+# def centrality_test(self, subgraph_edges_df:DataFrame, neighbors_df:DataFrame):
+#     if subgraph_edges_df.isEmpty():
+#         return subgraph_edges_df
+#     # Step 1: Extract neighbors for each node in the subgraph
+#     subgraph_neighbors = (
+#         subgraph_edges_df.alias("edges")
+#         .join(neighbors_df.alias("nbrs"), F.col("edges.id") == F.col("nbrs.node"), "inner")
+#         # .join(neighbors_df.alias("nbrs"), F.col("edges.src") == F.col("nbrs.node"), "inner")
+#         .select(F.col("edges.id").alias("node"), F.col("nbrs.neighbor").alias("neighbor"))
+#         .union(
+#             subgraph_edges_df.alias("edges")
+#             .join(neighbors_df.alias("nbrs"), F.col("edges.dst") == F.col("nbrs.node"), "inner")
+#             .select(F.col("edges.dst").alias("node"), F.col("nbrs.neighbor").alias("neighbor"))
+#         )
+#     )
+#
+#     # Step 2: Find shared neighbors (cn = neighbors_u & neighbors_v)
+#     common_neighbors_df = (
+#         subgraph_neighbors.alias("n1")
+#         .join(subgraph_neighbors.alias("n2"),
+#               (F.col("n1.neighbor") == F.col("n2.neighbor")) & (F.col("n1.node") > F.col("n2.node")),
+#               "inner")
+#         .select(F.col("n1.node").alias("u"), F.col("n2.node").alias("v"), F.col("n1.neighbor").alias("common_neighbor"))
+#     )
+#
+#     # Step 3: Extract central nodes (u, v, and cn)
+#     central_nodes_df = (
+#         common_neighbors_df
+#         .select("u").union(common_neighbors_df.select("v")).union(common_neighbors_df.select("common_neighbor"))
+#         .distinct()
+#     )
+#     printTrace("central_nodes_df", central_nodes_df)
+#     return central_nodes_df
 
 def remove_from_community(self, df:DataFrame, saved_vertices: DataFrame, communityTagsDf: DataFrame, communitiesDf: DataFrame, isCentralDf= False):
     if not df or df.isEmpty():
@@ -2024,13 +1598,6 @@ def remove_from_community(self, df:DataFrame, saved_vertices: DataFrame, communi
     printTrace("[remove com] nodes_to_remove_comms", nodes_to_remove_comms)
     # saved_vertices = loadState(self=self, pathToload=self.vertices_path, schemaToCreate=self.vertices_schema)
     current_vertices_with_coms = nodes_to_remove_comms.join(saved_vertices, F.col("node") == F.col("id"), "left_outer")
-    # exploded_current_vertices_with_coms = current_vertices_with_coms.withColumn("c_com", F.explode("c_coms"))
-
-    # to_remove_coms = nodes_to_remove_comms.alias("to_remove").join(exploded_current_vertices_with_coms.alias("exploded_vertices"), F.col("to_remove.community") == F.col("exploded_vertices.c_com"), "left_outer")
-    # printTrace("to_remove_coms", to_remove_coms)
-
-    ## Community - Vertices removal ##
-    # printTrace("[remove com] current_vertices_with_coms", current_vertices_with_coms)
 
     nodes_with_removal_comms = (current_vertices_with_coms.distinct()
         .groupBy("node")
@@ -2065,9 +1632,7 @@ def remove_from_community(self, df:DataFrame, saved_vertices: DataFrame, communi
     )
     printTrace("[remove com] removal_tags_df", removal_tags_df)
 
-    # communityTagsDf = loadState(self=self, pathToload=self.communityTags_path, schemaToCreate=self.communityTags_schema)
-    printMsg("[remove com] Loaded communityTags fully shown")
-    communityTagsDf.show(n=500, truncate=False)
+    printTrace("[remove com] Loaded communityTags fully shown", communityTagsDf)
 
     updated_communityTagsDf = (
         communityTagsDf.alias("ct")
@@ -2087,10 +1652,8 @@ def remove_from_community(self, df:DataFrame, saved_vertices: DataFrame, communi
     # Community - Tags removal ##
 
     ## Community - Nodes removal ##
-    # communitiesDf = loadState(self=self, pathToload=self.communities_path, schemaToCreate=self.communities_schema)
     removalNodesDf = (
         current_vertices_with_coms
-        # nodes_to_remove_comms
         .select(F.col("node").cast("string"), F.col("community"))
         .distinct()
     )
@@ -2114,77 +1677,16 @@ def remove_from_community(self, df:DataFrame, saved_vertices: DataFrame, communi
     printTrace("[remove com] all communities (communitiesDf)", communitiesDf)
     ## Community - Nodes removal ##
 
-    # saveState(updated_vertices, self.vertices_path)
-    # saveState(updated_communityTagsDf, self.communityTags_path)
-    # saveState(updated_communitiesDf, self.communities_path)
-
     printMsg("finished removing edge(after save)")
 
-    updated_vertices.cache()
-    updated_vertices.count()
-    updated_communityTagsDf.cache()
-    updated_communityTagsDf.count()
-    updated_communitiesDf.cache()
-    updated_communitiesDf.count()
+    # updated_vertices.cache()
+    # updated_vertices.count()
+    # updated_communityTagsDf.cache()
+    # updated_communityTagsDf.count()
+    # updated_communitiesDf.cache()
+    # updated_communitiesDf.count()
 
     return updated_vertices, updated_communityTagsDf, updated_communitiesDf
-
-
-    # Step 2: First explode (breaks array into separate rows)
-    # exploded_tags_df = current_vertices_with_coms.withColumn("tag_string", F.explode("tags"))
-
-    # Step 3: Split comma-separated values into an array and explode again
-    # exploded_tags_df = exploded_tags_df.withColumn("tag", F.explode(F.split(F.col("tag_string"), ","))).drop(
-    #     "tag_string")
-
-    # # Step 2: Explode tags
-    # exploded_tags_df = nodes_to_remove_comms.withColumn("tag", F.explode(F.split(F.col("tags"), ",")))
-
-
-    # communityTagsDf = communityTagsDf.withColumn("tag_string", F.explode("tags"))
-    # communityTagsDf = communityTagsDf.withColumn("tag", F.explode(F.split(F.col("tag_string"), ","))).drop(
-    #     "tag_string")
-
-    # Step 3: Remove from CommunityTags - filter and remove tags
-    # updated_communityTags_df = exploded_tags_df.join(
-    #     communityTagsDf, exploded_tags_df["tag"] == communityTagsDf["tag"], "left_outer"
-    # ).filter(F.col("community_id").isNotNull()).select("community_id", "tag").distinct()
-    #
-    # printTrace("remove from com updated_communityTags_df:", updated_communityTags_df)
-    #
-    # communityTags_removed_df = communityTagsDf.join(
-    #     updated_communityTags_df,
-    #     ["community_id", "tag"],
-    #     "left_anti"  # Keep only the rows where community_id + tag does not match
-    # )
-
-    # Step 4: Remove nodes from communities
-    # updated_communities_df_u = communitiesDf.join(
-    #     updated_communityTags_df,
-    #     (communitiesDf["node_id"] == df["node_u"]) & (communitiesDf["cid"] == updated_communityTags_df["community_id"]),
-    #     "left_anti"  # Use left_anti to remove matching rows
-    # )
-    # printTrace("remove from com updated_communities_df_u:", updated_communities_df_u)
-    #
-    # updated_communities_df_v = communitiesDf.join(
-    #     updated_communityTags_df,
-    #     (communitiesDf["node_id"] == df["node_v"]) & (communitiesDf["cid"] == updated_communityTags_df["community_id"]),
-    #     "left_anti"  # Use left_anti to remove matching rows
-    # )
-    # printTrace("remove from com updated_communities_df_v:", updated_communities_df_v)
-    #
-    # updated_communities_df = updated_communities_df_u.union(updated_communities_df_v).distinct()
-
-    # printTrace("remove from com communityTags_removed_df:", communityTags_removed_df)
-    # printTrace("remove from com updated_communities_df:", updated_communities_df)
-
-    # saveState(communityTags_removed_df, self.communityTags_path)
-    # saveState(updated_communities_df, self.communities_path)
-
-
-
-
-
 
 
 
@@ -2239,12 +1741,6 @@ def update_graph_with_edges(all_edges: DataFrame, new_edges: DataFrame):
 
     return totalEdges
 
-def saveStateVerticesAndEdges(self, vertices: DataFrame = None, edges: DataFrame = None):
-    """
-    Saves the current state of vertices and edges to Parquet files.
-    """
-    saveState(dataframeToBeSaved=vertices, pathToBeSaved=self.vertices_path)
-    saveState(dataframeToBeSaved=edges, pathToBeSaved=self.edges_path)
 
 def saveState(dataframeToBeSaved: DataFrame, pathToBeSaved: str):
     if dataframeToBeSaved is not None:
@@ -2254,29 +1750,16 @@ def saveState(dataframeToBeSaved: DataFrame, pathToBeSaved: str):
         dataframeToBeSaved.unpersist()
         # dataframeToBeSaved.count()
 
-        # temp_path = pathToBeSaved + "_temp"
-        # # Step 2: Move the temporary directory to the final location
-        # if os.path.exists(pathToBeSaved):
-        #     shutil.rmtree(pathToBeSaved)  # Delete the existing directory
-        # os.rename(temp_path, pathToBeSaved)  # Move the temporary directory to the final path
-        # dataframeToBeSaved.count()
-
 def loadState(self, pathToload: str, schemaToCreate: str = None):
     """
     Loads the state of vertices and edges from Parquet files.
     If no state exists, returns empty DataFrames with the appropriate schema.
     """
     try:
-        loadedDataframe = self.spark.read.format("parquet").load(pathToload)
-        loadedDataframe.cache()
+        loadedDataframe = self.spark.read.format("parquet").schema(schemaToCreate).load(pathToload)
+        # loadedDataframe.cache()
         loadedDataframe.count()
-    except Exception:  # Handle case where file does not exist
+    except Exception as e:  # Handle case where file does not exist
         loadedDataframe = self.spark.createDataFrame([], schemaToCreate)
 
     return loadedDataframe
-
-
-def loadStateVerticesAndEdges(self):
-    vertices = loadState(self=self, pathToload=self.vertices_path, schemaToCreate=self.vertices_schema)
-    edges = loadState(self=self, pathToload=self.edges_path, schemaToCreate=self.edges_schema)
-    return vertices, edges
