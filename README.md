@@ -1,6 +1,8 @@
 Step 1:
 stream_file.py
 -> Opens a socket at localhost:9999 and starts sending data reading them from file_path, default to <path>/Small_NetowrkData2.txt
+Execute via python3.10 stream_file.py <path> --host <ip> --port <port>
+Default values apply.
 
 Step 2:
 streaming_spark.py
@@ -16,4 +18,7 @@ Example of a line tab-delimited
  5th: tags (comma-separated)
 
 NOTE: If streaming_spark sits idle after initial launch, restart and it should start working.
+
+Execute via python3.10 streaming_spark.py --host <ip> --port <port>
+Default values apply.
 
