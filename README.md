@@ -29,7 +29,8 @@ Example of a line tab-delimited
  4th: timestamp - event time
  
  5th: tags (comma-separated)
- 
+
+ streaming_spark.py executes /applied/TILES.py 
 
 NOTE: If streming_spark sits idle after initial launch, restart and it should start working.
 
